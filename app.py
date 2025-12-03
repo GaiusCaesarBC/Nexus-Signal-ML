@@ -11,10 +11,14 @@ import json
 from models.predictor import StockPredictor
 from utils.technical_indicators import TechnicalIndicators
 from utils.market_data import fetch_stock_data
+from utils.ai_insights import generate_insights
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)  # Enable CORS for requests from Node.js backend
+
+# Configure CORS with allowed origins from environment variable
+allowed_origins = os.getenv('CORS_ALLOWED_ORIGINS', '*').split(',')
+CORS(app, origins=allowed_origins)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -51,7 +55,11 @@ def predict():
         
         if not symbol:
             return jsonify({'error': 'Symbol is required'}), 400
-        
+
+        # Validate days parameter
+        if not isinstance(days, int) or days < 1 or days > 365:
+            days = 7  # Reset to default if invalid
+
         logger.info(f'Prediction request for {symbol}')
         
         # Fetch historical data
@@ -94,23 +102,29 @@ def predict_batch():
         
         if not symbols or not isinstance(symbols, list):
             return jsonify({'error': 'Symbols array is required'}), 400
-        
+
+        # Validate days parameter
+        if not isinstance(days, int) or days < 1 or days > 365:
+            days = 7  # Reset to default if invalid
+
         logger.info(f'Batch prediction request for {len(symbols)} symbols')
-        
+
+        # Reuse single TechnicalIndicators instance for efficiency
+        tech_indicators = TechnicalIndicators()
+
         results = []
         for symbol in symbols:
             try:
                 symbol = symbol.upper()
                 stock_data = fetch_stock_data(symbol, period='6mo')
-                
+
                 if stock_data is None or len(stock_data) < 30:
                     results.append({
                         'symbol': symbol,
                         'error': 'Insufficient data'
                     })
                     continue
-                
-                tech_indicators = TechnicalIndicators()
+
                 indicators = tech_indicators.calculate_all(stock_data)
                 prediction_result = predictor.predict(symbol, stock_data, indicators, days)
                 results.append(prediction_result)
@@ -165,7 +179,6 @@ def analyze():
         indicators = tech_indicators.calculate_all(stock_data)
         
         # Get AI insights
-        from utils.ai_insights import generate_insights
         insights = generate_insights(symbol, stock_data, indicators)
         
         # Get prediction
@@ -187,43 +200,7 @@ def analyze():
         logger.error(f'Error in analysis: {str(e)}')
         return jsonify({'error': str(e)}), 500
 
-@app.route('/train', methods=['POST'])
-def train_model():
-    """
-    Retrain the ML model with latest data
-    
-    Request body:
-    {
-        "symbols": ["AAPL", "GOOGL", "MSFT"]  (optional)
-    }
-    """
-    try:
-        data = request.get_json()
-        symbols = data.get('symbols', ['AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA'])
-        
-        logger.info(f'Training model with {len(symbols)} symbols')
-        
-        # Train the model
-        success = predictor.train_model(symbols)
-        
-        if success:
-            return jsonify({
-                'status': 'success',
-                'message': 'Model trained successfully',
-                'timestamp': datetime.now().isoformat()
-            })
-        else:
-            return jsonify({
-                'status': 'error',
-                'message': 'Model training failed'
-            }), 500
-            
-    except Exception as e:
-        logger.error(f'Error in training: {str(e)}')
-        return jsonify({'error': str(e)}), 500
-
-
-
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    debug_mode = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
+    app.run(host='0.0.0.0', port=port, debug=debug_mode)
