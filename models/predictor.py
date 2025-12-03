@@ -7,6 +7,18 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
+
+def safe_float(val, default=0):
+    """Safely convert value to float, handling pandas Series and None values"""
+    if val is None:
+        return default
+    if hasattr(val, 'iloc'):
+        return float(val.iloc[-1]) if len(val) > 0 else default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
 class StockPredictor:
     def __init__(self, model_path=None):
         """
@@ -52,17 +64,6 @@ class StockPredictor:
             signals = self._generate_signals(indicators)
             
             # Build technical analysis summary - ensure all values are scalars
-            def safe_float(val, default=0):
-                """Safely convert value to float"""
-                if val is None:
-                    return default
-                if hasattr(val, 'iloc'):
-                    return float(val.iloc[-1]) if len(val) > 0 else default
-                try:
-                    return float(val)
-                except:
-                    return default
-            
             technical_analysis = {
                 'rsi': safe_float(indicators.get('rsi', 50), 50),
                 'macd_signal': str(indicators.get('macd_signal', 'Neutral')),
@@ -241,9 +242,10 @@ class StockPredictor:
             target_price = current_price * (1 - price_change_pct)
             
         else:
-            # Neutral - small random walk
-            price_change_pct = volatility * 0.3  # Small move based on volatility
-            target_price = current_price * (1 + (np.random.randn() * price_change_pct))
+            # Neutral - use small deterministic adjustment based on recent trend
+            # Instead of random, use a small percentage of volatility
+            price_change_pct = volatility * 0.1  # Small move based on volatility
+            target_price = current_price * (1 + price_change_pct)
         
         return direction, round(confidence, 1), round(target_price, 2)
     
@@ -252,18 +254,7 @@ class StockPredictor:
         Generate human-readable trading signals
         """
         signals = []
-        
-        def safe_float(val, default=0):
-            """Safely convert value to float"""
-            if val is None:
-                return default
-            if hasattr(val, 'iloc'):
-                return float(val.iloc[-1]) if len(val) > 0 else default
-            try:
-                return float(val)
-            except:
-                return default
-        
+
         # RSI signals
         rsi = safe_float(indicators.get('rsi', 50), 50)
         if rsi < 30:

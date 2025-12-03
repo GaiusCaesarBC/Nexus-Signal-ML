@@ -17,7 +17,7 @@ class TechnicalIndicators:
     def calculate_rsi(self, data, period=14):
         """
         Calculate Relative Strength Index (RSI)
-        
+
         RSI = 100 - (100 / (1 + RS))
         where RS = Average Gain / Average Loss
         """
@@ -25,10 +25,13 @@ class TechnicalIndicators:
             delta = data['Close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-            
-            rs = gain / loss
+
+            # Avoid division by zero - when loss is 0, RS is infinite, so RSI = 100
+            rs = gain / loss.replace(0, np.nan)
             rsi = 100 - (100 / (1 + rs))
-            
+            # Fill NaN values (where loss was 0) with 100 (max RSI)
+            rsi = rsi.fillna(100)
+
             return rsi
         except Exception as e:
             logger.error(f'Error calculating RSI: {str(e)}')
@@ -125,16 +128,22 @@ class TechnicalIndicators:
     def calculate_stochastic(self, data, period=14):
         """
         Calculate Stochastic Oscillator
-        
+
         %K = (Current Close - Lowest Low) / (Highest High - Lowest Low) × 100
         """
         try:
             low_min = data['Low'].rolling(window=period).min()
             high_max = data['High'].rolling(window=period).max()
-            
-            k_percent = 100 * ((data['Close'] - low_min) / (high_max - low_min))
+
+            # Avoid division by zero when high == low (flat price)
+            price_range = high_max - low_min
+            price_range = price_range.replace(0, np.nan)
+
+            k_percent = 100 * ((data['Close'] - low_min) / price_range)
+            # Fill NaN values with 50 (neutral) when price range is 0
+            k_percent = k_percent.fillna(50)
             d_percent = k_percent.rolling(window=3).mean()
-            
+
             return k_percent, d_percent
         except Exception as e:
             logger.error(f'Error calculating Stochastic: {str(e)}')

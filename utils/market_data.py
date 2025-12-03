@@ -4,14 +4,21 @@ import pandas as pd
 import requests
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY', 'PEXURBVRQN38FWX1')
-COINGECKO_API_KEY = os.getenv('COINGECKO_API_KEY', 'CG-3AvEd6fvXYtj6DV1qi6b9t6p')
+# API keys must be set via environment variables - no defaults for security
+ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY')
+COINGECKO_API_KEY = os.getenv('COINGECKO_API_KEY')
+
+if not ALPHA_VANTAGE_API_KEY:
+    logger.warning('ALPHA_VANTAGE_API_KEY not set - stock data fetching will fail')
+if not COINGECKO_API_KEY:
+    logger.warning('COINGECKO_API_KEY not set - crypto data fetching will fail')
 
 # CoinGecko symbol mapping
 CRYPTO_MAPPING = {
@@ -432,9 +439,8 @@ def fetch_multiple_stocks(symbols, period='6mo'):
             data = fetch_stock_data(symbol, period)
             if data is not None:
                 result[symbol] = data
-            
+
             # Rate limiting
-            import time
             time.sleep(0.5)
         
         return result
