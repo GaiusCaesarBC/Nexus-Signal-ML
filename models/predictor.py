@@ -247,7 +247,7 @@ class StockPredictor:
             price_change_pct = volatility * 0.1  # Small move based on volatility
             target_price = current_price * (1 + price_change_pct)
         
-        return direction, round(confidence, 1), round(target_price, 2)
+        return direction, round(confidence, 1), target_price
     
     def _generate_signals(self, indicators):
         """

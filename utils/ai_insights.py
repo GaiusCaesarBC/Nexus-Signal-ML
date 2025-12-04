@@ -42,7 +42,7 @@ Analyze this stock prediction for {symbol} and provide investment insights:
 **Prediction:**
 - Direction: {prediction_data.get('prediction', {}).get('direction', 'NEUTRAL')}
 - Confidence: {prediction_data.get('prediction', {}).get('confidence', 0):.1f}%
-- Target Price (7 days): ${prediction_data.get('prediction', {}).get('target_price', 0):.2f}
+- Target Price (7 days): ${prediction_data.get('prediction', {}).get('target_price', 0):.10g}
 - Expected Change: {prediction_data.get('prediction', {}).get('price_change_percent', 0):+.2f}%
 
 **Technical Indicators:**
