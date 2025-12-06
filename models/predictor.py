@@ -1,11 +1,20 @@
-# ml-service/models/predictor.py - ENHANCED with better predictions
+# ml-service/models/predictor.py - ENHANCED with ML predictions + rule-based fallback
 
 import numpy as np
 import pandas as pd
 import logging
 from datetime import datetime, timedelta
+import os
 
 logger = logging.getLogger(__name__)
+
+# Try to import ML model
+try:
+    from models.ml_model import StockMLModel, EnsemblePredictor
+    ML_AVAILABLE = True
+except ImportError:
+    ML_AVAILABLE = False
+    logger.warning('ML models not available, using rule-based predictions only')
 
 
 def safe_float(val, default=0):
@@ -19,50 +28,104 @@ def safe_float(val, default=0):
     except (ValueError, TypeError):
         return default
 
+
 class StockPredictor:
-    def __init__(self, model_path=None):
+    def __init__(self, model_dir='trained_models', use_ml=True, use_ensemble=True):
         """
-        Initialize the predictor
+        Initialize the predictor with ML models.
+
+        Args:
+            model_dir: Directory containing trained models
+            use_ml: Whether to use ML predictions (falls back to rule-based if False or no model)
+            use_ensemble: If True, use ensemble of XGBoost+LightGBM; else just XGBoost
         """
-        self.model_path = model_path
-        self.model = None
-        
-        # Try to load pre-trained model if available
-        if model_path:
+        self.model_dir = model_dir
+        self.use_ml = use_ml and ML_AVAILABLE
+        self.use_ensemble = use_ensemble
+        self.ml_model = None
+        self._loaded_symbols = set()
+
+        # Initialize ML model
+        if self.use_ml:
             try:
-                import joblib
-                self.model = joblib.load(model_path)
-                logger.info('Pre-trained model loaded successfully')
+                if use_ensemble:
+                    self.ml_model = EnsemblePredictor(model_dir)
+                else:
+                    self.ml_model = StockMLModel(model_dir, use_lightgbm=False)
+                logger.info(f'ML model initialized (ensemble={use_ensemble})')
             except Exception as e:
-                logger.info('No pre-trained model found, will use rule-based predictions')
+                logger.warning(f'Failed to initialize ML model: {e}')
+                self.use_ml = False
+
+    def _try_load_model(self, symbol):
+        """Try to load a trained model for the symbol."""
+        if not self.use_ml or self.ml_model is None:
+            return False
+
+        if symbol in self._loaded_symbols:
+            return True
+
+        # Try symbol-specific model first, then generic
+        if hasattr(self.ml_model, 'load_models'):
+            loaded = self.ml_model.load_models(symbol)
+        else:
+            loaded = self.ml_model.load_model(symbol)
+
+        if loaded:
+            self._loaded_symbols.add(symbol)
+
+        return loaded
     
     def predict(self, symbol, data, indicators, days=7):
         """
-        Make a prediction for a stock
-        
+        Make a prediction for a stock using ML model or rule-based fallback.
+
         Args:
             symbol: Stock ticker
             data: Historical price data (DataFrame)
             indicators: Technical indicators (dict)
             days: Prediction timeframe in days
-        
+
         Returns:
             Dictionary with prediction results
         """
         try:
             current_price = float(data['Close'].iloc[-1])
-            
-            # Calculate prediction using enhanced rule-based system
-            direction, confidence, target_price = self._rule_based_prediction(
-                current_price, indicators, days
-            )
-            
-            price_change = target_price - current_price
-            price_change_percent = (price_change / current_price) * 100
-            
+            ml_prediction = None
+            prediction_method = 'rule_based'
+
+            # Try ML prediction first
+            if self.use_ml and self.ml_model is not None:
+                self._try_load_model(symbol)
+                try:
+                    ml_prediction = self.ml_model.predict(data, indicators, days)
+                    if ml_prediction is not None:
+                        prediction_method = ml_prediction.get('model_type', 'ml')
+                except Exception as e:
+                    logger.warning(f'ML prediction failed for {symbol}: {e}')
+                    ml_prediction = None
+
+            # Use ML prediction or fall back to rule-based
+            if ml_prediction is not None:
+                direction = ml_prediction['direction']
+                confidence = ml_prediction['confidence']
+                price_change_percent = ml_prediction['predicted_change_percent']
+
+                # Calculate target price from predicted change
+                if direction == 'UP':
+                    target_price = current_price * (1 + abs(price_change_percent) / 100)
+                else:
+                    target_price = current_price * (1 - abs(price_change_percent) / 100)
+            else:
+                # Fall back to rule-based prediction
+                direction, confidence, target_price = self._rule_based_prediction(
+                    current_price, indicators, days
+                )
+                price_change_percent = ((target_price - current_price) / current_price) * 100
+
             # Generate signals
             signals = self._generate_signals(indicators)
-            
+
             # Build technical analysis summary - ensure all values are scalars
             technical_analysis = {
                 'rsi': safe_float(indicators.get('rsi', 50), 50),
@@ -70,8 +133,8 @@ class StockPredictor:
                 'volatility': safe_float(indicators.get('volatility', 0), 0),
                 'volume_status': str(indicators.get('volume_status', 'Normal'))
             }
-            
-            return {
+
+            result = {
                 'symbol': symbol,
                 'current_price': current_price,
                 'prediction': {
@@ -83,9 +146,16 @@ class StockPredictor:
                 },
                 'signals': signals,
                 'technical_analysis': technical_analysis,
+                'prediction_method': prediction_method,
                 'timestamp': datetime.now().isoformat()
             }
-            
+
+            # Include ML-specific data if available
+            if ml_prediction is not None and 'probabilities' in ml_prediction:
+                result['ml_probabilities'] = ml_prediction['probabilities']
+
+            return result
+
         except Exception as e:
             logger.error(f'Error making prediction for {symbol}: {str(e)}')
             raise
@@ -319,16 +389,16 @@ class StockPredictor:
     def batch_predict(self, predictions_data, days=7):
         """
         Make predictions for multiple stocks
-        
+
         Args:
             predictions_data: List of (symbol, data, indicators) tuples
             days: Prediction timeframe
-        
+
         Returns:
             List of prediction dictionaries
         """
         results = []
-        
+
         for symbol, data, indicators in predictions_data:
             try:
                 prediction = self.predict(symbol, data, indicators, days)
@@ -339,5 +409,84 @@ class StockPredictor:
                     'symbol': symbol,
                     'error': str(e)
                 })
-        
+
         return results
+
+    def train(self, symbol, data, indicators, days=7):
+        """
+        Train the ML model for a specific stock.
+
+        Args:
+            symbol: Stock ticker
+            data: Historical OHLCV data
+            indicators: Technical indicators
+            days: Prediction horizon
+
+        Returns:
+            Training metrics or None if training failed
+        """
+        if not self.use_ml or self.ml_model is None:
+            logger.warning('ML not available, cannot train')
+            return None
+
+        try:
+            if hasattr(self.ml_model, 'train'):
+                # Single model training
+                metrics = self.ml_model.train(symbol, data, indicators, days)
+            else:
+                # Ensemble training (trains both XGBoost and LightGBM)
+                metrics = self.ml_model.train(symbol, data, indicators, days)
+
+            if metrics:
+                self._loaded_symbols.add(symbol)
+
+            return metrics
+        except Exception as e:
+            logger.error(f'Training failed for {symbol}: {e}')
+            return None
+
+    def train_generic(self, training_data, days=7):
+        """
+        Train a generic model on multiple stocks' data.
+
+        Args:
+            training_data: List of (symbol, data, indicators) tuples
+            days: Prediction horizon
+
+        Returns:
+            Combined training metrics
+        """
+        if not self.use_ml or self.ml_model is None:
+            logger.warning('ML not available, cannot train')
+            return None
+
+        all_metrics = []
+        for symbol, data, indicators in training_data:
+            try:
+                metrics = self.train(symbol, data, indicators, days)
+                if metrics:
+                    all_metrics.append(metrics)
+            except Exception as e:
+                logger.error(f'Training failed for {symbol}: {e}')
+
+        return {
+            'total_trained': len(all_metrics),
+            'symbols': [m.get('symbol') if isinstance(m, dict) else 'unknown' for m in all_metrics],
+            'metrics': all_metrics
+        }
+
+    def get_model_info(self):
+        """Get information about the loaded ML model."""
+        info = {
+            'ml_available': ML_AVAILABLE,
+            'ml_enabled': self.use_ml,
+            'ensemble_mode': self.use_ensemble,
+            'loaded_symbols': list(self._loaded_symbols),
+            'model_dir': self.model_dir
+        }
+
+        if self.use_ml and self.ml_model is not None:
+            if hasattr(self.ml_model, 'get_feature_importance'):
+                info['feature_importance'] = self.ml_model.get_feature_importance()
+
+        return info

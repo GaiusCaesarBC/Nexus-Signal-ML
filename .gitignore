@@ -5,3 +5,4 @@ venv/
 *.log
 models/saved_models/*.pkl
 data/
+trained_models/
