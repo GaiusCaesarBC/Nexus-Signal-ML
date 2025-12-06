@@ -7,23 +7,31 @@ import os
 from datetime import datetime, timedelta
 import joblib
 
-try:
-    import xgboost as xgb
-    XGB_AVAILABLE = True
-except ImportError:
-    XGB_AVAILABLE = False
-
-try:
-    import lightgbm as lgb
-    LGB_AVAILABLE = True
-except ImportError:
-    LGB_AVAILABLE = False
-
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, mean_absolute_error, classification_report
 
 logger = logging.getLogger(__name__)
+
+# Initialize ML library availability flags
+XGB_AVAILABLE = False
+LGB_AVAILABLE = False
+xgb = None
+lgb = None
+
+try:
+    import xgboost as xgb
+    XGB_AVAILABLE = True
+    logger.info('XGBoost loaded successfully')
+except ImportError as e:
+    logger.warning(f'XGBoost not available: {e}')
+
+try:
+    import lightgbm as lgb
+    LGB_AVAILABLE = True
+    logger.info('LightGBM loaded successfully')
+except ImportError as e:
+    logger.warning(f'LightGBM not available: {e}')
 
 
 class StockMLModel:
@@ -256,6 +264,14 @@ class StockMLModel:
         Returns:
             Training metrics dict
         """
+        # Check if ML libraries are available
+        if not self.use_lightgbm and not XGB_AVAILABLE:
+            logger.error('XGBoost not available and LightGBM not enabled')
+            return None
+        if self.use_lightgbm and not LGB_AVAILABLE:
+            logger.error('LightGBM not available')
+            return None
+
         logger.info(f'Training ML model for {symbol} with {len(data)} samples')
 
         # Engineer features
@@ -308,8 +324,7 @@ class StockMLModel:
                 subsample=0.8,
                 colsample_bytree=0.8,
                 random_state=42,
-                eval_metric='logloss',
-                use_label_encoder=False
+                eval_metric='logloss'
             )
 
         # Train Magnitude Model (Regression)
