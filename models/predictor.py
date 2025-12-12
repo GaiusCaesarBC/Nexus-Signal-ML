@@ -8,6 +8,11 @@ import os
 
 logger = logging.getLogger(__name__)
 
+# Confidence thresholds for signal strength classification
+STRONG_SIGNAL_THRESHOLD = 65  # >= 65% = strong signal
+MODERATE_SIGNAL_THRESHOLD = 55  # >= 55% = moderate signal
+# Below 55% = weak signal (not actionable)
+
 # Try to import ML model
 try:
     from models.ml_model import StockMLModel, EnsemblePredictor
@@ -134,6 +139,19 @@ class StockPredictor:
                 'volume_status': str(indicators.get('volume_status', 'Normal'))
             }
 
+            # Determine signal strength based on confidence
+            if confidence >= STRONG_SIGNAL_THRESHOLD:
+                signal_strength = 'strong'
+                is_actionable = True
+            elif confidence >= MODERATE_SIGNAL_THRESHOLD:
+                signal_strength = 'moderate'
+                is_actionable = True
+            else:
+                signal_strength = 'weak'
+                is_actionable = False
+                # For weak signals, set direction to NEUTRAL to avoid misleading users
+                direction = 'NEUTRAL'
+
             result = {
                 'symbol': symbol,
                 'current_price': current_price,
@@ -142,13 +160,19 @@ class StockPredictor:
                     'confidence': confidence,
                     'target_price': target_price,
                     'price_change_percent': price_change_percent,
-                    'timeframe_days': days
+                    'timeframe_days': days,
+                    'signal_strength': signal_strength,
+                    'is_actionable': is_actionable
                 },
                 'signals': signals,
                 'technical_analysis': technical_analysis,
                 'prediction_method': prediction_method,
                 'timestamp': datetime.now().isoformat()
             }
+
+            # Add warning message for weak signals
+            if not is_actionable:
+                result['warning'] = f'Low confidence prediction ({confidence:.1f}%). No strong signal detected - consider waiting for clearer market conditions.'
 
             # Include ML-specific data if available
             if ml_prediction is not None and 'probabilities' in ml_prediction:
