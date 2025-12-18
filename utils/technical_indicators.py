@@ -186,6 +186,154 @@ class TechnicalIndicators:
             return (pd.Series([25] * len(data)),
                     pd.Series([25] * len(data)),
                     pd.Series([25] * len(data)))
+
+    def calculate_williams_r(self, data, period=14):
+        """
+        Calculate Williams %R - momentum indicator
+
+        Range: -100 to 0
+        Below -80: Oversold
+        Above -20: Overbought
+        """
+        try:
+            highest_high = data['High'].rolling(window=period).max()
+            lowest_low = data['Low'].rolling(window=period).min()
+
+            price_range = highest_high - lowest_low
+            price_range = price_range.replace(0, np.nan)
+
+            williams_r = -100 * ((highest_high - data['Close']) / price_range)
+            return williams_r.fillna(-50)
+        except Exception as e:
+            logger.error(f'Error calculating Williams %R: {str(e)}')
+            return pd.Series([-50] * len(data))
+
+    def calculate_cci(self, data, period=20):
+        """
+        Calculate Commodity Channel Index (CCI)
+
+        Above +100: Overbought
+        Below -100: Oversold
+        """
+        try:
+            typical_price = (data['High'] + data['Low'] + data['Close']) / 3
+            sma_tp = typical_price.rolling(window=period).mean()
+            mean_deviation = typical_price.rolling(window=period).apply(
+                lambda x: np.mean(np.abs(x - x.mean())), raw=True
+            )
+
+            cci = (typical_price - sma_tp) / (0.015 * mean_deviation)
+            return cci.fillna(0)
+        except Exception as e:
+            logger.error(f'Error calculating CCI: {str(e)}')
+            return pd.Series([0] * len(data))
+
+    def calculate_mfi(self, data, period=14):
+        """
+        Calculate Money Flow Index (MFI) - volume-weighted RSI
+
+        Range: 0 to 100
+        Above 80: Overbought
+        Below 20: Oversold
+        """
+        try:
+            typical_price = (data['High'] + data['Low'] + data['Close']) / 3
+            money_flow = typical_price * data['Volume']
+
+            delta = typical_price.diff()
+            positive_flow = money_flow.where(delta > 0, 0).rolling(window=period).sum()
+            negative_flow = money_flow.where(delta < 0, 0).rolling(window=period).sum()
+
+            mfi_ratio = positive_flow / negative_flow.replace(0, np.nan)
+            mfi = 100 - (100 / (1 + mfi_ratio))
+            return mfi.fillna(50)
+        except Exception as e:
+            logger.error(f'Error calculating MFI: {str(e)}')
+            return pd.Series([50] * len(data))
+
+    def calculate_roc(self, data, period=10):
+        """
+        Calculate Rate of Change (ROC) - momentum
+
+        Positive: Price rising
+        Negative: Price falling
+        """
+        try:
+            roc = ((data['Close'] - data['Close'].shift(period)) /
+                   data['Close'].shift(period)) * 100
+            return roc.fillna(0)
+        except Exception as e:
+            logger.error(f'Error calculating ROC: {str(e)}')
+            return pd.Series([0] * len(data))
+
+    def calculate_vwap(self, data):
+        """
+        Calculate Volume Weighted Average Price (VWAP)
+        """
+        try:
+            typical_price = (data['High'] + data['Low'] + data['Close']) / 3
+            vwap = (typical_price * data['Volume']).cumsum() / data['Volume'].cumsum()
+            return vwap
+        except Exception as e:
+            logger.error(f'Error calculating VWAP: {str(e)}')
+            return data['Close']
+
+    def calculate_ichimoku(self, data):
+        """
+        Calculate Ichimoku Cloud components
+
+        Returns:
+            tenkan_sen (conversion line): 9-period
+            kijun_sen (base line): 26-period
+            senkou_span_a (leading span A)
+            senkou_span_b (leading span B): 52-period
+        """
+        try:
+            # Tenkan-sen (Conversion Line): 9-period high/low average
+            high_9 = data['High'].rolling(window=9).max()
+            low_9 = data['Low'].rolling(window=9).min()
+            tenkan_sen = (high_9 + low_9) / 2
+
+            # Kijun-sen (Base Line): 26-period high/low average
+            high_26 = data['High'].rolling(window=26).max()
+            low_26 = data['Low'].rolling(window=26).min()
+            kijun_sen = (high_26 + low_26) / 2
+
+            # Senkou Span A (Leading Span A): Average of Tenkan-sen and Kijun-sen
+            senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
+
+            # Senkou Span B (Leading Span B): 52-period high/low average
+            high_52 = data['High'].rolling(window=52).max()
+            low_52 = data['Low'].rolling(window=52).min()
+            senkou_span_b = ((high_52 + low_52) / 2).shift(26)
+
+            return tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b
+        except Exception as e:
+            logger.error(f'Error calculating Ichimoku: {str(e)}')
+            price = data['Close']
+            return price, price, price, price
+
+    def calculate_pivot_points(self, data):
+        """
+        Calculate Pivot Points for support/resistance levels
+        """
+        try:
+            # Use previous day's data
+            high = data['High'].shift(1)
+            low = data['Low'].shift(1)
+            close = data['Close'].shift(1)
+
+            pivot = (high + low + close) / 3
+            r1 = 2 * pivot - low
+            s1 = 2 * pivot - high
+            r2 = pivot + (high - low)
+            s2 = pivot - (high - low)
+
+            return pivot, r1, s1, r2, s2
+        except Exception as e:
+            logger.error(f'Error calculating Pivot Points: {str(e)}')
+            price = data['Close']
+            return price, price, price, price, price
     
     def calculate_all(self, data):
         """
@@ -203,13 +351,22 @@ class TechnicalIndicators:
             # Trend indicators
             indicators['sma_20'] = self.calculate_sma(data, 20)
             indicators['sma_50'] = self.calculate_sma(data, 50)
+            indicators['sma_200'] = self.calculate_sma(data, 200)  # Long-term trend
             indicators['ema_12'] = self.calculate_ema(data, 12)
             indicators['ema_26'] = self.calculate_ema(data, 26)
+            indicators['ema_50'] = self.calculate_ema(data, 50)
 
             # Momentum indicators
             indicators['rsi'] = self.calculate_rsi(data)
             indicators['macd'], indicators['signal'] = self.calculate_macd(data)
             indicators['stoch_k'], indicators['stoch_d'] = self.calculate_stochastic(data)
+
+            # NEW: Additional momentum indicators
+            indicators['williams_r'] = self.calculate_williams_r(data)
+            indicators['cci'] = self.calculate_cci(data)
+            indicators['roc'] = self.calculate_roc(data)
+            if 'Volume' in data.columns:
+                indicators['mfi'] = self.calculate_mfi(data)
 
             # Volatility indicators
             indicators['bb_upper'], indicators['bb_middle'], indicators['bb_lower'] = self.calculate_bollinger_bands(data)
@@ -217,9 +374,17 @@ class TechnicalIndicators:
 
             # Volume indicators
             indicators['obv'] = self.calculate_obv(data)
+            if 'Volume' in data.columns:
+                indicators['vwap'] = self.calculate_vwap(data)
 
             # Trend strength
             indicators['adx'], indicators['plus_di'], indicators['minus_di'] = self.calculate_adx(data)
+
+            # NEW: Ichimoku Cloud
+            indicators['tenkan_sen'], indicators['kijun_sen'], indicators['senkou_span_a'], indicators['senkou_span_b'] = self.calculate_ichimoku(data)
+
+            # NEW: Pivot Points
+            indicators['pivot'], indicators['r1'], indicators['s1'], indicators['r2'], indicators['s2'] = self.calculate_pivot_points(data)
 
             # Add derived signals for rule-based prediction
             self._add_derived_signals(data, indicators)

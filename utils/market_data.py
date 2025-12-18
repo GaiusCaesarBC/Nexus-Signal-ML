@@ -30,7 +30,8 @@ CRYPTO_MAPPING = {
     'SOL': 'solana',
     'DOT': 'polkadot',
     'DOGE': 'dogecoin',
-    'MATIC': 'matic-network',
+    'MATIC': 'polygon-ecosystem-token',  # Rebranded from matic-network to POL
+    'POL': 'polygon-ecosystem-token',
     'LTC': 'litecoin',
     'AVAX': 'avalanche-2',
     'SHIB': 'shiba-inu',
@@ -52,6 +53,8 @@ CRYPTO_MAPPING = {
     'WIF': 'dogwifcoin',
     'BONK': 'bonk',
     'TRUMP': 'official-trump',  # Trump coin
+    'ICP': 'internet-computer',  # Internet Computer
+    'FLOKI': 'floki',  # Floki Inu
     'ZEC': 'zcash',  # Zcash
     'XMR': 'monero',
     'HBAR': 'hedera-hashgraph',

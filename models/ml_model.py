@@ -58,21 +58,54 @@ class StockMLModel:
         self.magnitude_model = None  # Regression: price change %
         self.scaler = StandardScaler()
 
-        # Feature configuration
+        # Feature configuration - EXPANDED with new indicators
         self.feature_columns = [
-            'rsi', 'rsi_change', 'rsi_ma',
+            # RSI features
+            'rsi', 'rsi_change', 'rsi_ma', 'rsi_divergence',
+            # MACD features
             'macd', 'macd_signal', 'macd_hist', 'macd_hist_change',
-            'bb_position', 'bb_width', 'bb_squeeze',
+            # Bollinger Bands features
+            'bb_position', 'bb_width', 'bb_squeeze', 'bb_trend',
+            # Stochastic features
             'stoch_k', 'stoch_d', 'stoch_cross',
-            'atr', 'atr_percent',
+            # NEW: Williams %R
+            'williams_r', 'williams_r_change',
+            # NEW: CCI
+            'cci', 'cci_change',
+            # NEW: MFI
+            'mfi', 'mfi_change',
+            # NEW: ROC
+            'roc', 'roc_change',
+            # ATR features
+            'atr', 'atr_percent', 'atr_change',
+            # OBV features
             'obv_change', 'obv_ma_ratio',
-            'sma_20_ratio', 'sma_50_ratio', 'ema_12_ratio',
+            # NEW: VWAP features
+            'vwap_ratio', 'vwap_distance',
+            # Moving average ratios - expanded
+            'sma_20_ratio', 'sma_50_ratio', 'sma_200_ratio',
+            'ema_12_ratio', 'ema_50_ratio',
+            'ma_cross_20_50', 'ma_cross_50_200',
+            # Price momentum
             'price_momentum_5', 'price_momentum_10', 'price_momentum_20',
-            'volume_ratio', 'volume_ma_ratio',
-            'high_low_range', 'close_position',
-            'adx', 'plus_di', 'minus_di',
+            # Volume features
+            'volume_ratio', 'volume_ma_ratio', 'volume_trend',
+            # Price range features
+            'high_low_range', 'close_position', 'gap',
+            # Trend strength (ADX)
+            'adx', 'plus_di', 'minus_di', 'di_cross',
+            # Returns
             'returns_1d', 'returns_5d', 'returns_10d',
-            'volatility_5d', 'volatility_10d', 'volatility_20d'
+            # Volatility
+            'volatility_5d', 'volatility_10d', 'volatility_20d',
+            # NEW: Ichimoku features
+            'ichimoku_signal', 'cloud_thickness', 'price_vs_cloud',
+            # NEW: Pivot point features
+            'pivot_distance', 'near_support', 'near_resistance',
+            # NEW: Lagged features
+            'rsi_lag_1', 'rsi_lag_5', 'macd_lag_1',
+            # NEW: Day of week (for patterns)
+            'day_of_week',
         ]
 
         # Training config
@@ -93,6 +126,7 @@ class StockMLModel:
     def engineer_features(self, data, indicators):
         """
         Create feature matrix from price data and technical indicators.
+        EXPANDED with new indicators for improved accuracy.
 
         Args:
             data: DataFrame with OHLCV data
@@ -110,10 +144,23 @@ class StockMLModel:
             features['rsi'] = rsi
             features['rsi_change'] = rsi.diff()
             features['rsi_ma'] = rsi.rolling(window=5).mean()
+            # RSI divergence (price up but RSI down = bearish divergence)
+            price_change = df['Close'].pct_change(5)
+            rsi_change_5 = rsi.diff(5)
+            features['rsi_divergence'] = np.where(
+                (price_change > 0) & (rsi_change_5 < 0), -1,  # Bearish
+                np.where((price_change < 0) & (rsi_change_5 > 0), 1, 0)  # Bullish
+            )
+            # Lagged RSI
+            features['rsi_lag_1'] = rsi.shift(1)
+            features['rsi_lag_5'] = rsi.shift(5)
         else:
             features['rsi'] = 50
             features['rsi_change'] = 0
             features['rsi_ma'] = 50
+            features['rsi_divergence'] = 0
+            features['rsi_lag_1'] = 50
+            features['rsi_lag_5'] = 50
 
         # MACD features
         if 'macd' in indicators and 'signal' in indicators:
@@ -123,11 +170,13 @@ class StockMLModel:
             features['macd_signal'] = signal
             features['macd_hist'] = macd - signal
             features['macd_hist_change'] = features['macd_hist'].diff()
+            features['macd_lag_1'] = macd.shift(1)
         else:
             features['macd'] = 0
             features['macd_signal'] = 0
             features['macd_hist'] = 0
             features['macd_hist_change'] = 0
+            features['macd_lag_1'] = 0
 
         # Bollinger Bands features
         if 'bb_upper' in indicators and 'bb_lower' in indicators:
@@ -135,23 +184,24 @@ class StockMLModel:
             bb_lower = indicators['bb_lower']
             bb_middle = indicators.get('bb_middle', (bb_upper + bb_lower) / 2)
 
-            # Position within bands (0=lower, 1=upper)
             bb_range = bb_upper - bb_lower
             features['bb_position'] = (df['Close'] - bb_lower) / bb_range.replace(0, np.nan)
             features['bb_width'] = bb_range / bb_middle
             features['bb_squeeze'] = features['bb_width'].rolling(window=20).apply(
-                lambda x: 1 if x.iloc[-1] == x.min() else 0
+                lambda x: 1 if len(x) > 0 and x.iloc[-1] == x.min() else 0, raw=False
             )
+            # BB trend (expanding or contracting)
+            features['bb_trend'] = features['bb_width'].diff()
         else:
             features['bb_position'] = 0.5
             features['bb_width'] = 0
             features['bb_squeeze'] = 0
+            features['bb_trend'] = 0
 
         # Stochastic features
         if 'stoch_k' in indicators:
             features['stoch_k'] = indicators['stoch_k']
             features['stoch_d'] = indicators.get('stoch_d', indicators['stoch_k'].rolling(3).mean())
-            # Stochastic crossover signal
             features['stoch_cross'] = np.where(
                 features['stoch_k'] > features['stoch_d'], 1,
                 np.where(features['stoch_k'] < features['stoch_d'], -1, 0)
@@ -161,13 +211,52 @@ class StockMLModel:
             features['stoch_d'] = 50
             features['stoch_cross'] = 0
 
+        # NEW: Williams %R features
+        if 'williams_r' in indicators:
+            wr = indicators['williams_r']
+            features['williams_r'] = wr
+            features['williams_r_change'] = wr.diff()
+        else:
+            features['williams_r'] = -50
+            features['williams_r_change'] = 0
+
+        # NEW: CCI features
+        if 'cci' in indicators:
+            cci = indicators['cci']
+            features['cci'] = cci
+            features['cci_change'] = cci.diff()
+        else:
+            features['cci'] = 0
+            features['cci_change'] = 0
+
+        # NEW: MFI features
+        if 'mfi' in indicators:
+            mfi = indicators['mfi']
+            features['mfi'] = mfi
+            features['mfi_change'] = mfi.diff()
+        else:
+            features['mfi'] = 50
+            features['mfi_change'] = 0
+
+        # NEW: ROC features
+        if 'roc' in indicators:
+            roc = indicators['roc']
+            features['roc'] = roc
+            features['roc_change'] = roc.diff()
+        else:
+            features['roc'] = 0
+            features['roc_change'] = 0
+
         # ATR features
         if 'atr' in indicators:
-            features['atr'] = indicators['atr']
-            features['atr_percent'] = indicators['atr'] / df['Close'] * 100
+            atr = indicators['atr']
+            features['atr'] = atr
+            features['atr_percent'] = atr / df['Close'] * 100
+            features['atr_change'] = atr.diff()
         else:
             features['atr'] = df['High'] - df['Low']
             features['atr_percent'] = features['atr'] / df['Close'] * 100
+            features['atr_change'] = features['atr'].diff()
 
         # OBV features
         if 'obv' in indicators:
@@ -178,10 +267,31 @@ class StockMLModel:
             features['obv_change'] = 0
             features['obv_ma_ratio'] = 1
 
-        # Moving average ratios
-        features['sma_20_ratio'] = df['Close'] / df['Close'].rolling(window=20).mean()
-        features['sma_50_ratio'] = df['Close'] / df['Close'].rolling(window=50).mean()
-        features['ema_12_ratio'] = df['Close'] / df['Close'].ewm(span=12).mean()
+        # NEW: VWAP features
+        if 'vwap' in indicators:
+            vwap = indicators['vwap']
+            features['vwap_ratio'] = df['Close'] / vwap
+            features['vwap_distance'] = (df['Close'] - vwap) / vwap * 100
+        else:
+            features['vwap_ratio'] = 1
+            features['vwap_distance'] = 0
+
+        # Moving average ratios - expanded
+        sma_20 = df['Close'].rolling(window=20).mean()
+        sma_50 = df['Close'].rolling(window=50).mean()
+        sma_200 = df['Close'].rolling(window=200).mean()
+        ema_12 = df['Close'].ewm(span=12).mean()
+        ema_50 = df['Close'].ewm(span=50).mean()
+
+        features['sma_20_ratio'] = df['Close'] / sma_20
+        features['sma_50_ratio'] = df['Close'] / sma_50
+        features['sma_200_ratio'] = df['Close'] / sma_200
+        features['ema_12_ratio'] = df['Close'] / ema_12
+        features['ema_50_ratio'] = df['Close'] / ema_50
+
+        # MA crossover signals
+        features['ma_cross_20_50'] = np.where(sma_20 > sma_50, 1, -1)
+        features['ma_cross_50_200'] = np.where(sma_50 > sma_200, 1, -1)
 
         # Price momentum
         features['price_momentum_5'] = df['Close'].pct_change(5)
@@ -190,26 +300,35 @@ class StockMLModel:
 
         # Volume features
         if 'Volume' in df.columns:
-            vol_ma = df['Volume'].rolling(window=20).mean()
-            features['volume_ratio'] = df['Volume'] / vol_ma
-            features['volume_ma_ratio'] = vol_ma / vol_ma.rolling(window=50).mean()
+            vol_ma_20 = df['Volume'].rolling(window=20).mean()
+            vol_ma_50 = df['Volume'].rolling(window=50).mean()
+            features['volume_ratio'] = df['Volume'] / vol_ma_20
+            features['volume_ma_ratio'] = vol_ma_20 / vol_ma_50
+            features['volume_trend'] = df['Volume'].rolling(5).mean() / vol_ma_20
         else:
             features['volume_ratio'] = 1
             features['volume_ma_ratio'] = 1
+            features['volume_trend'] = 1
 
         # Price range features
         features['high_low_range'] = (df['High'] - df['Low']) / df['Close']
         features['close_position'] = (df['Close'] - df['Low']) / (df['High'] - df['Low']).replace(0, np.nan)
+        features['gap'] = (df['Open'] - df['Close'].shift(1)) / df['Close'].shift(1)
 
-        # ADX features (trend strength)
+        # ADX features
         if 'adx' in indicators:
             features['adx'] = indicators['adx']
             features['plus_di'] = indicators.get('plus_di', 25)
             features['minus_di'] = indicators.get('minus_di', 25)
+            # DI crossover signal
+            features['di_cross'] = np.where(
+                indicators.get('plus_di', 25) > indicators.get('minus_di', 25), 1, -1
+            )
         else:
             features['adx'] = 25
             features['plus_di'] = 25
             features['minus_di'] = 25
+            features['di_cross'] = 0
 
         # Returns
         features['returns_1d'] = df['Close'].pct_change(1)
@@ -220,6 +339,49 @@ class StockMLModel:
         features['volatility_5d'] = df['Close'].pct_change().rolling(5).std()
         features['volatility_10d'] = df['Close'].pct_change().rolling(10).std()
         features['volatility_20d'] = df['Close'].pct_change().rolling(20).std()
+
+        # NEW: Ichimoku features
+        if 'tenkan_sen' in indicators and 'kijun_sen' in indicators:
+            tenkan = indicators['tenkan_sen']
+            kijun = indicators['kijun_sen']
+            span_a = indicators.get('senkou_span_a', tenkan)
+            span_b = indicators.get('senkou_span_b', kijun)
+
+            # Ichimoku signal: 1=bullish, -1=bearish
+            features['ichimoku_signal'] = np.where(tenkan > kijun, 1, -1)
+            # Cloud thickness
+            features['cloud_thickness'] = (span_a - span_b) / df['Close'] * 100
+            # Price vs cloud
+            cloud_top = np.maximum(span_a, span_b)
+            cloud_bottom = np.minimum(span_a, span_b)
+            features['price_vs_cloud'] = np.where(
+                df['Close'] > cloud_top, 1,
+                np.where(df['Close'] < cloud_bottom, -1, 0)
+            )
+        else:
+            features['ichimoku_signal'] = 0
+            features['cloud_thickness'] = 0
+            features['price_vs_cloud'] = 0
+
+        # NEW: Pivot point features
+        if 'pivot' in indicators:
+            pivot = indicators['pivot']
+            r1 = indicators.get('r1', pivot)
+            s1 = indicators.get('s1', pivot)
+
+            features['pivot_distance'] = (df['Close'] - pivot) / pivot * 100
+            features['near_support'] = (df['Close'] - s1).abs() / df['Close'] < 0.02
+            features['near_resistance'] = (df['Close'] - r1).abs() / df['Close'] < 0.02
+        else:
+            features['pivot_distance'] = 0
+            features['near_support'] = 0
+            features['near_resistance'] = 0
+
+        # NEW: Day of week (for patterns - Monday=0, Friday=4)
+        if hasattr(df.index, 'dayofweek'):
+            features['day_of_week'] = df.index.dayofweek
+        else:
+            features['day_of_week'] = 2  # Default to Wednesday
 
         # Fill NaN values
         features = features.ffill().bfill()
@@ -304,48 +466,66 @@ class StockMLModel:
         # Time series split for validation
         tscv = TimeSeriesSplit(n_splits=5)
 
-        # Train Direction Model (Classification)
+        # Calculate class weights for imbalanced data
+        class_counts = y_direction.value_counts()
+        total = len(y_direction)
+        class_weight_dict = {0: total / (2 * class_counts.get(0, 1)),
+                             1: total / (2 * class_counts.get(1, 1))}
+
+        # Train Direction Model (Classification) - IMPROVED hyperparameters
         if self.use_lightgbm:
             self.direction_model = lgb.LGBMClassifier(
-                n_estimators=200,
-                max_depth=6,
-                learning_rate=0.05,
-                num_leaves=31,
-                min_child_samples=20,
+                n_estimators=500,  # Increased
+                max_depth=8,  # Increased
+                learning_rate=0.03,  # Decreased for better generalization
+                num_leaves=63,  # Increased
+                min_child_samples=15,  # Decreased
+                reg_alpha=0.1,  # L1 regularization
+                reg_lambda=0.1,  # L2 regularization
+                class_weight=class_weight_dict,
                 random_state=42,
                 verbose=-1
             )
         else:
             self.direction_model = xgb.XGBClassifier(
-                n_estimators=200,
-                max_depth=6,
-                learning_rate=0.05,
-                min_child_weight=5,
-                subsample=0.8,
-                colsample_bytree=0.8,
+                n_estimators=500,  # Increased
+                max_depth=8,  # Increased
+                learning_rate=0.03,  # Decreased
+                min_child_weight=3,  # Decreased
+                subsample=0.85,
+                colsample_bytree=0.85,
+                gamma=0.1,  # Regularization
+                reg_alpha=0.1,  # L1 regularization
+                reg_lambda=0.1,  # L2 regularization
+                scale_pos_weight=class_weight_dict[1] / class_weight_dict[0],
                 random_state=42,
                 eval_metric='logloss'
             )
 
-        # Train Magnitude Model (Regression)
+        # Train Magnitude Model (Regression) - IMPROVED hyperparameters
         if self.use_lightgbm:
             self.magnitude_model = lgb.LGBMRegressor(
-                n_estimators=200,
-                max_depth=6,
-                learning_rate=0.05,
-                num_leaves=31,
-                min_child_samples=20,
+                n_estimators=500,
+                max_depth=8,
+                learning_rate=0.03,
+                num_leaves=63,
+                min_child_samples=15,
+                reg_alpha=0.1,
+                reg_lambda=0.1,
                 random_state=42,
                 verbose=-1
             )
         else:
             self.magnitude_model = xgb.XGBRegressor(
-                n_estimators=200,
-                max_depth=6,
-                learning_rate=0.05,
-                min_child_weight=5,
-                subsample=0.8,
-                colsample_bytree=0.8,
+                n_estimators=500,
+                max_depth=8,
+                learning_rate=0.03,
+                min_child_weight=3,
+                subsample=0.85,
+                colsample_bytree=0.85,
+                gamma=0.1,
+                reg_alpha=0.1,
+                reg_lambda=0.1,
                 random_state=42
             )
 
