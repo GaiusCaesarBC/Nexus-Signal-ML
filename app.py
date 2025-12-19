@@ -2,6 +2,7 @@
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from functools import wraps
 import os
 import logging
 from datetime import datetime
@@ -23,6 +24,31 @@ CORS(app, origins=allowed_origins)
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# API Key Authentication
+ML_API_KEY = os.getenv('ML_API_KEY')
+
+def require_api_key(f):
+    """Decorator to require API key for protected endpoints."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Skip auth if no API key is configured (development mode)
+        if not ML_API_KEY:
+            return f(*args, **kwargs)
+
+        # Check for API key in header
+        provided_key = request.headers.get('X-API-Key') or request.headers.get('Authorization', '').replace('Bearer ', '')
+
+        if not provided_key:
+            logger.warning('API request without API key')
+            return jsonify({'error': 'API key required', 'code': 'UNAUTHORIZED'}), 401
+
+        if provided_key != ML_API_KEY:
+            logger.warning('API request with invalid API key')
+            return jsonify({'error': 'Invalid API key', 'code': 'FORBIDDEN'}), 403
+
+        return f(*args, **kwargs)
+    return decorated_function
 
 # Available prediction horizons
 AVAILABLE_HORIZONS = {
@@ -102,6 +128,7 @@ def get_horizons():
 
 
 @app.route('/predict', methods=['POST'])
+@require_api_key
 def predict():
     """
     Predict price movement for a single stock
@@ -158,9 +185,10 @@ def predict():
         
     except Exception as e:
         logger.error(f'Error in prediction: {str(e)}')
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'An error occurred while processing your prediction request'}), 500
 
 @app.route('/predict/batch', methods=['POST'])
+@require_api_key
 def predict_batch():
     """
     Predict price movements for multiple stocks
@@ -220,7 +248,7 @@ def predict_batch():
                 logger.error(f'Error predicting {symbol}: {str(e)}')
                 results.append({
                     'symbol': symbol,
-                    'error': str(e)
+                    'error': 'Prediction failed for this symbol'
                 })
 
         return jsonify({
@@ -232,9 +260,10 @@ def predict_batch():
         
     except Exception as e:
         logger.error(f'Error in batch prediction: {str(e)}')
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'An error occurred while processing batch predictions'}), 500
 
 @app.route('/analyze', methods=['POST'])
+@require_api_key
 def analyze():
     """
     Deep analysis of a stock with AI-powered insights
@@ -286,10 +315,11 @@ def analyze():
 
     except Exception as e:
         logger.error(f'Error in analysis: {str(e)}')
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'An error occurred while analyzing the stock'}), 500
 
 
 @app.route('/train', methods=['POST'])
+@require_api_key
 def train_model():
     """
     Train ML model for a specific stock
@@ -342,10 +372,11 @@ def train_model():
 
     except Exception as e:
         logger.error(f'Error in training: {str(e)}')
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'An error occurred while training the model'}), 500
 
 
 @app.route('/train/batch', methods=['POST'])
+@require_api_key
 def train_batch():
     """
     Train ML models for multiple stocks
@@ -403,7 +434,7 @@ def train_batch():
                 results.append({
                     'symbol': symbol,
                     'status': 'failed',
-                    'error': str(e)
+                    'error': 'Training failed for this symbol'
                 })
 
         successful = len([r for r in results if r.get('status') == 'trained'])
@@ -418,10 +449,11 @@ def train_batch():
 
     except Exception as e:
         logger.error(f'Error in batch training: {str(e)}')
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'An error occurred while processing batch training'}), 500
 
 
 @app.route('/model/info', methods=['GET'])
+@require_api_key
 def model_info():
     """Get information about the ML model"""
     try:
@@ -429,7 +461,7 @@ def model_info():
         return jsonify(info)
     except Exception as e:
         logger.error(f'Error getting model info: {str(e)}')
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'An error occurred while retrieving model info'}), 500
 
 
 if __name__ == '__main__':
