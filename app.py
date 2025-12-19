@@ -24,8 +24,55 @@ CORS(app, origins=allowed_origins)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize predictor
-predictor = StockPredictor()
+# Available prediction horizons
+AVAILABLE_HORIZONS = {
+    7: {'name': 'short', 'description': 'Short-term (7 days)', 'model_dir': 'trained_models/7d'},
+    30: {'name': 'medium', 'description': 'Medium-term (30 days)', 'model_dir': 'trained_models/30d'},
+    90: {'name': 'long', 'description': 'Long-term (90 days)', 'model_dir': 'trained_models/90d'}
+}
+
+# Initialize predictors for each horizon
+predictors = {}
+for horizon, config in AVAILABLE_HORIZONS.items():
+    model_dir = config['model_dir']
+    if os.path.exists(model_dir):
+        predictors[horizon] = StockPredictor(model_dir=model_dir)
+        logger.info(f'Loaded {horizon}-day predictor from {model_dir}')
+    else:
+        logger.info(f'No trained models found for {horizon}-day horizon at {model_dir}')
+
+# Default predictor (7-day or fallback to trained_models)
+if 7 in predictors:
+    default_predictor = predictors[7]
+elif os.path.exists('trained_models'):
+    default_predictor = StockPredictor(model_dir='trained_models')
+    predictors[7] = default_predictor
+    logger.info('Using default trained_models directory')
+else:
+    default_predictor = StockPredictor()
+    predictors[7] = default_predictor
+    logger.info('No trained models found, using untrained predictor')
+
+
+def get_predictor_for_days(days):
+    """Get the appropriate predictor for the given horizon."""
+    # Find closest available horizon
+    if days in predictors:
+        return predictors[days], days
+
+    # Map to nearest horizon
+    if days <= 14:
+        horizon = 7
+    elif days <= 60:
+        horizon = 30
+    else:
+        horizon = 90
+
+    if horizon in predictors:
+        return predictors[horizon], horizon
+
+    # Fallback to default
+    return default_predictor, 7
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -37,22 +84,39 @@ def health_check():
         'timestamp': datetime.now().isoformat()
     })
 
+@app.route('/horizons', methods=['GET'])
+def get_horizons():
+    """Get available prediction horizons"""
+    horizons = []
+    for days, config in AVAILABLE_HORIZONS.items():
+        horizons.append({
+            'days': days,
+            'name': config['name'],
+            'description': config['description'],
+            'available': days in predictors
+        })
+    return jsonify({
+        'horizons': horizons,
+        'default': 7
+    })
+
+
 @app.route('/predict', methods=['POST'])
 def predict():
     """
     Predict price movement for a single stock
-    
+
     Request body:
     {
         "symbol": "AAPL",
-        "days": 7  (optional, default 7)
+        "days": 7  (optional, default 7 - supported: 7, 30, 90)
     }
     """
     try:
         data = request.get_json()
         symbol = data.get('symbol', '').upper()
         days = data.get('days', 7)
-        
+
         if not symbol:
             return jsonify({'error': 'Symbol is required'}), 400
 
@@ -60,24 +124,36 @@ def predict():
         if not isinstance(days, int) or days < 1 or days > 365:
             days = 7  # Reset to default if invalid
 
-        logger.info(f'Prediction request for {symbol}')
-        
-        # Fetch historical data
-        stock_data = fetch_stock_data(symbol, period='6mo')
-        
+        # Get the appropriate predictor for this horizon
+        predictor, actual_horizon = get_predictor_for_days(days)
+
+        logger.info(f'Prediction request for {symbol} ({actual_horizon}d horizon)')
+
+        # Fetch historical data (more for long-term predictions)
+        period = '1y' if days > 30 else '6mo'
+        stock_data = fetch_stock_data(symbol, period=period)
+
         if stock_data is None or len(stock_data) < 30:
             return jsonify({
                 'error': f'Insufficient data for {symbol}',
                 'symbol': symbol
             }), 400
-        
+
         # Calculate technical indicators
         tech_indicators = TechnicalIndicators()
         indicators = tech_indicators.calculate_all(stock_data)
-        
-        # Make prediction
-        prediction_result = predictor.predict(symbol, stock_data, indicators, days)
-        
+
+        # Make prediction using horizon-specific model
+        prediction_result = predictor.predict(symbol, stock_data, indicators, actual_horizon)
+
+        # Add horizon info to response
+        if prediction_result and isinstance(prediction_result, dict):
+            prediction_result['horizon'] = {
+                'requested': days,
+                'actual': actual_horizon,
+                'name': AVAILABLE_HORIZONS.get(actual_horizon, {}).get('name', 'custom')
+            }
+
         return jsonify(prediction_result)
         
     except Exception as e:
@@ -88,18 +164,18 @@ def predict():
 def predict_batch():
     """
     Predict price movements for multiple stocks
-    
+
     Request body:
     {
         "symbols": ["AAPL", "GOOGL", "MSFT"],
-        "days": 7  (optional, default 7)
+        "days": 7  (optional, default 7 - supported: 7, 30, 90)
     }
     """
     try:
         data = request.get_json()
         symbols = data.get('symbols', [])
         days = data.get('days', 7)
-        
+
         if not symbols or not isinstance(symbols, list):
             return jsonify({'error': 'Symbols array is required'}), 400
 
@@ -107,16 +183,22 @@ def predict_batch():
         if not isinstance(days, int) or days < 1 or days > 365:
             days = 7  # Reset to default if invalid
 
-        logger.info(f'Batch prediction request for {len(symbols)} symbols')
+        # Get the appropriate predictor for this horizon
+        predictor, actual_horizon = get_predictor_for_days(days)
+
+        logger.info(f'Batch prediction request for {len(symbols)} symbols ({actual_horizon}d horizon)')
 
         # Reuse single TechnicalIndicators instance for efficiency
         tech_indicators = TechnicalIndicators()
+
+        # Fetch more data for long-term predictions
+        period = '1y' if days > 30 else '6mo'
 
         results = []
         for symbol in symbols:
             try:
                 symbol = symbol.upper()
-                stock_data = fetch_stock_data(symbol, period='6mo')
+                stock_data = fetch_stock_data(symbol, period=period)
 
                 if stock_data is None or len(stock_data) < 30:
                     results.append({
@@ -126,19 +208,25 @@ def predict_batch():
                     continue
 
                 indicators = tech_indicators.calculate_all(stock_data)
-                prediction_result = predictor.predict(symbol, stock_data, indicators, days)
+                prediction_result = predictor.predict(symbol, stock_data, indicators, actual_horizon)
+
+                # Add horizon info
+                if prediction_result and isinstance(prediction_result, dict):
+                    prediction_result['horizon'] = actual_horizon
+
                 results.append(prediction_result)
-                
+
             except Exception as e:
                 logger.error(f'Error predicting {symbol}: {str(e)}')
                 results.append({
                     'symbol': symbol,
                     'error': str(e)
                 })
-        
+
         return jsonify({
             'predictions': results,
             'total': len(results),
+            'horizon': actual_horizon,
             'timestamp': datetime.now().isoformat()
         })
         

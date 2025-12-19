@@ -86,26 +86,40 @@ class StockMLModel:
             'sma_20_ratio', 'sma_50_ratio', 'sma_200_ratio',
             'ema_12_ratio', 'ema_50_ratio',
             'ma_cross_20_50', 'ma_cross_50_200',
-            # Price momentum
+            # Price momentum - short term
             'price_momentum_5', 'price_momentum_10', 'price_momentum_20',
+            # LONG-TERM: Extended momentum for 30d/90d predictions
+            'price_momentum_30', 'price_momentum_60', 'price_momentum_90',
             # Volume features
             'volume_ratio', 'volume_ma_ratio', 'volume_trend',
             # Price range features
             'high_low_range', 'close_position', 'gap',
             # Trend strength (ADX)
             'adx', 'plus_di', 'minus_di', 'di_cross',
-            # Returns
+            # Returns - short term
             'returns_1d', 'returns_5d', 'returns_10d',
-            # Volatility
+            # LONG-TERM: Extended returns
+            'returns_20d', 'returns_30d', 'returns_60d',
+            # Volatility - short term
             'volatility_5d', 'volatility_10d', 'volatility_20d',
+            # LONG-TERM: Extended volatility
+            'volatility_30d', 'volatility_60d',
             # NEW: Ichimoku features
             'ichimoku_signal', 'cloud_thickness', 'price_vs_cloud',
             # NEW: Pivot point features
             'pivot_distance', 'near_support', 'near_resistance',
             # NEW: Lagged features
             'rsi_lag_1', 'rsi_lag_5', 'macd_lag_1',
-            # NEW: Day of week (for patterns)
+            # Day of week (for patterns)
             'day_of_week',
+            # LONG-TERM: Seasonality features
+            'month_of_year', 'quarter',
+            # LONG-TERM: 52-week high/low distance
+            'distance_52w_high', 'distance_52w_low',
+            # LONG-TERM: Trend persistence
+            'trend_strength_30d', 'trend_consistency',
+            # LONG-TERM: Mean reversion signals
+            'mean_reversion_20d', 'mean_reversion_50d',
         ]
 
         # Training config
@@ -293,10 +307,15 @@ class StockMLModel:
         features['ma_cross_20_50'] = np.where(sma_20 > sma_50, 1, -1)
         features['ma_cross_50_200'] = np.where(sma_50 > sma_200, 1, -1)
 
-        # Price momentum
+        # Price momentum - short term
         features['price_momentum_5'] = df['Close'].pct_change(5)
         features['price_momentum_10'] = df['Close'].pct_change(10)
         features['price_momentum_20'] = df['Close'].pct_change(20)
+
+        # LONG-TERM: Extended momentum for 30d/90d predictions
+        features['price_momentum_30'] = df['Close'].pct_change(30)
+        features['price_momentum_60'] = df['Close'].pct_change(60)
+        features['price_momentum_90'] = df['Close'].pct_change(90)
 
         # Volume features
         if 'Volume' in df.columns:
@@ -330,15 +349,24 @@ class StockMLModel:
             features['minus_di'] = 25
             features['di_cross'] = 0
 
-        # Returns
+        # Returns - short term
         features['returns_1d'] = df['Close'].pct_change(1)
         features['returns_5d'] = df['Close'].pct_change(5)
         features['returns_10d'] = df['Close'].pct_change(10)
 
-        # Volatility
+        # LONG-TERM: Extended returns
+        features['returns_20d'] = df['Close'].pct_change(20)
+        features['returns_30d'] = df['Close'].pct_change(30)
+        features['returns_60d'] = df['Close'].pct_change(60)
+
+        # Volatility - short term
         features['volatility_5d'] = df['Close'].pct_change().rolling(5).std()
         features['volatility_10d'] = df['Close'].pct_change().rolling(10).std()
         features['volatility_20d'] = df['Close'].pct_change().rolling(20).std()
+
+        # LONG-TERM: Extended volatility
+        features['volatility_30d'] = df['Close'].pct_change().rolling(30).std()
+        features['volatility_60d'] = df['Close'].pct_change().rolling(60).std()
 
         # NEW: Ichimoku features
         if 'tenkan_sen' in indicators and 'kijun_sen' in indicators:
@@ -382,6 +410,37 @@ class StockMLModel:
             features['day_of_week'] = df.index.dayofweek
         else:
             features['day_of_week'] = 2  # Default to Wednesday
+
+        # LONG-TERM: Seasonality features (month and quarter)
+        if hasattr(df.index, 'month'):
+            features['month_of_year'] = df.index.month
+            features['quarter'] = df.index.quarter
+        else:
+            features['month_of_year'] = 6  # Default to June
+            features['quarter'] = 2
+
+        # LONG-TERM: 52-week (252 trading days) high/low distance
+        rolling_high_252 = df['High'].rolling(window=252, min_periods=20).max()
+        rolling_low_252 = df['Low'].rolling(window=252, min_periods=20).min()
+        features['distance_52w_high'] = (df['Close'] - rolling_high_252) / rolling_high_252 * 100
+        features['distance_52w_low'] = (df['Close'] - rolling_low_252) / rolling_low_252 * 100
+
+        # LONG-TERM: Trend persistence (how consistent is the trend over 30 days)
+        # Count how many of the last 30 days were positive
+        daily_returns = df['Close'].pct_change()
+        features['trend_strength_30d'] = daily_returns.rolling(30).apply(
+            lambda x: (x > 0).sum() / len(x) if len(x) > 0 else 0.5, raw=True
+        )
+        # Trend consistency (std of direction, lower = more consistent)
+        features['trend_consistency'] = daily_returns.rolling(30).apply(
+            lambda x: np.sign(x).std() if len(x) > 0 else 1, raw=True
+        )
+
+        # LONG-TERM: Mean reversion signals (distance from rolling mean)
+        sma_20_mr = df['Close'].rolling(window=20).mean()
+        sma_50_mr = df['Close'].rolling(window=50).mean()
+        features['mean_reversion_20d'] = (df['Close'] - sma_20_mr) / sma_20_mr * 100
+        features['mean_reversion_50d'] = (df['Close'] - sma_50_mr) / sma_50_mr * 100
 
         # Fill NaN values
         features = features.ffill().bfill()
