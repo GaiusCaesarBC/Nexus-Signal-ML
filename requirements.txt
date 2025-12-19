@@ -1,9 +1,19 @@
+# Core Flask
 Flask==3.1.0
 flask-cors==5.0.0
+gunicorn==23.0.0
+
+# Data processing
 pandas==2.2.3
 numpy==2.2.1
+
+# HTTP requests
 requests==2.32.3
+
+# Environment
 python-dotenv==1.0.1
+
+# AI/ML
 google-generativeai==0.8.3
 joblib==1.4.2
 xgboost==2.1.3
