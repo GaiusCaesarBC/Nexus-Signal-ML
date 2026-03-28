@@ -1,0 +1,8 @@
+﻿__pycache__/
+*.py[cod]
+venv/
+.env
+*.log
+models/saved_models/*.pkl
+data/
+trained_models/
