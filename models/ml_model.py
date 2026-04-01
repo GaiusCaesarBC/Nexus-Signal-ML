@@ -1,4 +1,5 @@
 # ml-service/models/ml_model.py - XGBoost/LightGBM ML Models for Stock Prediction
+# ENHANCED: Feature selection, hyperparameter tuning, improved targets
 
 import numpy as np
 import pandas as pd
@@ -10,8 +11,19 @@ import joblib
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, mean_absolute_error, classification_report
+from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
 
 logger = logging.getLogger(__name__)
+
+# Try to import Optuna for hyperparameter tuning
+OPTUNA_AVAILABLE = False
+try:
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    OPTUNA_AVAILABLE = True
+    logger.info('Optuna loaded successfully for hyperparameter tuning')
+except ImportError:
+    logger.warning('Optuna not available - using default hyperparameters')
 
 # Initialize ML library availability flags
 XGB_AVAILABLE = False
@@ -42,16 +54,32 @@ class StockMLModel:
     2. Price change magnitude - Regression
     """
 
-    def __init__(self, model_dir='trained_models', use_lightgbm=False):
+    def __init__(self, model_dir='trained_models', use_lightgbm=False,
+                 n_features=30, target_threshold=0.3, use_tuning=True):
         """
         Initialize the ML model.
 
         Args:
             model_dir: Directory to save/load trained models
             use_lightgbm: If True, use LightGBM instead of XGBoost
+            n_features: Number of top features to select (default 30)
+            target_threshold: Minimum % change to classify as UP/DOWN (default 0.3%)
+            use_tuning: Whether to use Optuna hyperparameter tuning
         """
         self.model_dir = model_dir
         self.use_lightgbm = use_lightgbm and LGB_AVAILABLE
+
+        # NEW: Feature selection config
+        self.n_features = n_features
+        self.feature_selector = None
+        self.selected_feature_names = None
+
+        # NEW: Target threshold to filter noise
+        self.target_threshold = target_threshold
+
+        # NEW: Hyperparameter tuning
+        self.use_tuning = use_tuning and OPTUNA_AVAILABLE
+        self.best_params = None
 
         # Models
         self.direction_model = None  # Classification: UP/DOWN
@@ -442,44 +470,114 @@ class StockMLModel:
         features['mean_reversion_20d'] = (df['Close'] - sma_20_mr) / sma_20_mr * 100
         features['mean_reversion_50d'] = (df['Close'] - sma_50_mr) / sma_50_mr * 100
 
-        # Fill NaN values
-        features = features.ffill().bfill()
+        # Fill NaN values — ffill only (bfill leaks future data into past rows)
+        features = features.ffill()
         features = features.replace([np.inf, -np.inf], 0)
         features = features.fillna(0)
 
         return features
 
-    def create_targets(self, data, days=5):
+    def create_targets(self, data, days=5, threshold=None):
         """
-        Create target variables for training.
+        Create target variables for training with noise filtering.
 
         Args:
             data: DataFrame with OHLCV data
-            days: Number of days ahead for prediction
+            days: Number of days ahead for prediction (matches prediction horizon)
+            threshold: Minimum % change to classify as UP/DOWN (filters noise)
 
         Returns:
-            direction (1=UP, 0=DOWN), magnitude (% change)
+            direction (1=UP, 0=DOWN, -1=NEUTRAL), magnitude (% change), valid_mask
         """
+        if threshold is None:
+            threshold = self.target_threshold
+
         # Future price change
         future_close = data['Close'].shift(-days)
         current_close = data['Close']
 
         pct_change = (future_close - current_close) / current_close * 100
 
-        # Direction: 1 = UP, 0 = DOWN
-        direction = (pct_change > 0).astype(int)
+        # Direction with threshold: Only classify significant moves
+        # This filters out noise where price barely moved
+        direction = pd.Series(index=data.index, dtype=int)
+        direction[:] = -1  # Default to NEUTRAL
 
-        return direction, pct_change
+        direction[pct_change >= threshold] = 1   # UP: significant positive move
+        direction[pct_change <= -threshold] = 0  # DOWN: significant negative move
+        # Moves between -threshold and +threshold stay as -1 (NEUTRAL/noise)
 
-    def train(self, symbol, data, indicators, days=5, save_model=True):
+        # Create mask for valid samples (exclude neutral/noise)
+        valid_mask = direction != -1
+
+        logger.info(f'Target distribution - UP: {(direction==1).sum()}, DOWN: {(direction==0).sum()}, '
+                   f'Filtered (noise): {(direction==-1).sum()} ({threshold}% threshold)')
+
+        return direction, pct_change, valid_mask
+
+    def _tune_hyperparameters(self, X_train, y_train, tscv, n_trials=30):
+        """
+        Use Optuna to find optimal hyperparameters.
+
+        Args:
+            X_train: Training features
+            y_train: Training labels
+            tscv: TimeSeriesSplit cross-validator
+            n_trials: Number of optimization trials
+
+        Returns:
+            Best hyperparameters dict
+        """
+        if not OPTUNA_AVAILABLE:
+            return None
+
+        def objective(trial):
+            params = {
+                'max_depth': trial.suggest_int('max_depth', 3, 6),
+                'n_estimators': trial.suggest_int('n_estimators', 100, 300),
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1),
+                'min_child_weight': trial.suggest_int('min_child_weight', 3, 10),
+                'subsample': trial.suggest_float('subsample', 0.6, 0.9),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.9),
+                'gamma': trial.suggest_float('gamma', 0.0, 0.3),
+                'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 0.5),
+                'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 0.5),
+            }
+
+            scores = []
+            for train_idx, val_idx in tscv.split(X_train):
+                X_t, X_v = X_train.iloc[train_idx], X_train.iloc[val_idx]
+                y_t, y_v = y_train.iloc[train_idx], y_train.iloc[val_idx]
+
+                model = xgb.XGBClassifier(
+                    **params,
+                    random_state=42,
+                    eval_metric='logloss',
+                    early_stopping_rounds=20,
+                    verbosity=0
+                )
+                model.fit(X_t, y_t, eval_set=[(X_v, y_v)], verbose=False)
+                pred = model.predict(X_v)
+                scores.append(accuracy_score(y_v, pred))
+
+            return np.mean(scores)
+
+        study = optuna.create_study(direction='maximize')
+        study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+        logger.info(f'Best hyperparameters found: accuracy={study.best_value:.2%}')
+        return study.best_params
+
+    def train(self, symbol, data, indicators, days=7, save_model=True):
         """
         Train ML models for a specific stock.
+        ENHANCED: Feature selection, hyperparameter tuning, noise filtering.
 
         Args:
             symbol: Stock ticker
             data: Historical OHLCV data (DataFrame)
             indicators: Calculated technical indicators
-            days: Prediction horizon in days
+            days: Prediction horizon in days (now properly used for target creation)
             save_model: Whether to save trained models
 
         Returns:
@@ -493,37 +591,63 @@ class StockMLModel:
             logger.error('LightGBM not available')
             return None
 
-        logger.info(f'Training ML model for {symbol} with {len(data)} samples')
+        logger.info(f'Training ML model for {symbol} with {len(data)} samples, {days}-day horizon')
 
         # Engineer features
         features = self.engineer_features(data, indicators)
 
-        # Create targets
-        direction, magnitude = self.create_targets(data, days)
+        # Create targets using the ACTUAL prediction horizon (not fixed 5 days)
+        direction, magnitude, valid_mask = self.create_targets(data, days=days)
 
-        # Align and clean data
-        valid_idx = ~(direction.isna() | magnitude.isna())
+        # Align and clean data - filter out noise samples
+        valid_idx = valid_mask & ~direction.isna() & ~magnitude.isna()
         X = features.loc[valid_idx]
         y_direction = direction.loc[valid_idx]
         y_magnitude = magnitude.loc[valid_idx]
 
         if len(X) < self.min_training_samples:
-            logger.warning(f'Insufficient data for {symbol}: {len(X)} samples')
+            logger.warning(f'Insufficient data for {symbol}: {len(X)} samples (need {self.min_training_samples})')
             return None
 
         # Use only available feature columns
         available_cols = [c for c in self.feature_columns if c in X.columns]
         X = X[available_cols]
 
-        # Scale features
+        # Scale features BEFORE feature selection
         X_scaled = pd.DataFrame(
             self.scaler.fit_transform(X),
             columns=X.columns,
             index=X.index
         )
 
-        # Time series split for validation
-        tscv = TimeSeriesSplit(n_splits=5)
+        # FEATURE SELECTION: Use tree-based importance (captures nonlinear relationships)
+        n_select = min(self.n_features, len(available_cols))
+        if XGB_AVAILABLE:
+            # Train quick model to get feature importances
+            quick_model = xgb.XGBClassifier(
+                n_estimators=50, max_depth=4, learning_rate=0.1,
+                use_label_encoder=False, eval_metric='logloss', verbosity=0
+            )
+            quick_model.fit(X_scaled, y_direction)
+            importances = quick_model.feature_importances_
+            top_indices = np.argsort(importances)[-n_select:]
+            self.selected_feature_names = [available_cols[i] for i in top_indices]
+            self.feature_selector = None  # Not using SelectKBest
+        else:
+            # Fallback to mutual information (nonlinear, better than f_classif)
+            self.feature_selector = SelectKBest(score_func=mutual_info_classif, k=n_select)
+            self.feature_selector.fit(X_scaled, y_direction)
+            selected_mask = self.feature_selector.get_support()
+            self.selected_feature_names = [col for col, selected in zip(available_cols, selected_mask) if selected]
+
+        logger.info(f'Feature selection: {len(available_cols)} → {len(self.selected_feature_names)} features')
+        logger.info(f'Top features: {self.selected_feature_names[:10]}')
+
+        # Select columns
+        X_selected = X_scaled[self.selected_feature_names]
+
+        # Time series split for validation (increased to 10 folds)
+        tscv = TimeSeriesSplit(n_splits=min(10, len(X_selected) // 50))
 
         # Calculate class weights for imbalanced data
         class_counts = y_direction.value_counts()
@@ -531,98 +655,185 @@ class StockMLModel:
         class_weight_dict = {0: total / (2 * class_counts.get(0, 1)),
                              1: total / (2 * class_counts.get(1, 1))}
 
-        # Train Direction Model (Classification) - IMPROVED hyperparameters
+        # HYPERPARAMETER TUNING with Optuna
+        if self.use_tuning and len(X_selected) >= 300:
+            logger.info('Running hyperparameter optimization...')
+            self.best_params = self._tune_hyperparameters(X_selected, y_direction, tscv, n_trials=30)
+        else:
+            self.best_params = None
+
+        # Build model with tuned or default hyperparameters
+        if self.best_params:
+            base_params = self.best_params.copy()
+        else:
+            # Optimized defaults (less aggressive than before)
+            base_params = {
+                'n_estimators': 200,
+                'max_depth': 5,
+                'learning_rate': 0.05,
+                'min_child_weight': 5,
+                'subsample': 0.8,
+                'colsample_bytree': 0.8,
+                'gamma': 0.1,
+                'reg_alpha': 0.1,
+                'reg_lambda': 0.1,
+            }
+
+        # Train Direction Model (Classification) with EARLY STOPPING
         if self.use_lightgbm:
             self.direction_model = lgb.LGBMClassifier(
-                n_estimators=500,  # Increased
-                max_depth=8,  # Increased
-                learning_rate=0.03,  # Decreased for better generalization
-                num_leaves=63,  # Increased
-                min_child_samples=15,  # Decreased
-                reg_alpha=0.1,  # L1 regularization
-                reg_lambda=0.1,  # L2 regularization
+                n_estimators=base_params.get('n_estimators', 200),
+                max_depth=base_params.get('max_depth', 5),
+                learning_rate=base_params.get('learning_rate', 0.05),
+                num_leaves=min(31, 2**base_params.get('max_depth', 5) - 1),
+                min_child_samples=base_params.get('min_child_weight', 5),
+                reg_alpha=base_params.get('reg_alpha', 0.1),
+                reg_lambda=base_params.get('reg_lambda', 0.1),
                 class_weight=class_weight_dict,
                 random_state=42,
                 verbose=-1
             )
         else:
             self.direction_model = xgb.XGBClassifier(
-                n_estimators=500,  # Increased
-                max_depth=8,  # Increased
-                learning_rate=0.03,  # Decreased
-                min_child_weight=3,  # Decreased
-                subsample=0.85,
-                colsample_bytree=0.85,
-                gamma=0.1,  # Regularization
-                reg_alpha=0.1,  # L1 regularization
-                reg_lambda=0.1,  # L2 regularization
+                n_estimators=base_params.get('n_estimators', 200),
+                max_depth=base_params.get('max_depth', 5),
+                learning_rate=base_params.get('learning_rate', 0.05),
+                min_child_weight=base_params.get('min_child_weight', 5),
+                subsample=base_params.get('subsample', 0.8),
+                colsample_bytree=base_params.get('colsample_bytree', 0.8),
+                gamma=base_params.get('gamma', 0.1),
+                reg_alpha=base_params.get('reg_alpha', 0.1),
+                reg_lambda=base_params.get('reg_lambda', 0.1),
                 scale_pos_weight=class_weight_dict[1] / class_weight_dict[0],
                 random_state=42,
-                eval_metric='logloss'
+                eval_metric='logloss',
+                early_stopping_rounds=30,
+                verbosity=0
             )
 
-        # Train Magnitude Model (Regression) - IMPROVED hyperparameters
+        # Train Magnitude Model (Regression)
         if self.use_lightgbm:
             self.magnitude_model = lgb.LGBMRegressor(
-                n_estimators=500,
-                max_depth=8,
-                learning_rate=0.03,
-                num_leaves=63,
-                min_child_samples=15,
-                reg_alpha=0.1,
-                reg_lambda=0.1,
+                n_estimators=base_params.get('n_estimators', 200),
+                max_depth=base_params.get('max_depth', 5),
+                learning_rate=base_params.get('learning_rate', 0.05),
+                num_leaves=min(31, 2**base_params.get('max_depth', 5) - 1),
+                min_child_samples=base_params.get('min_child_weight', 5),
+                reg_alpha=base_params.get('reg_alpha', 0.1),
+                reg_lambda=base_params.get('reg_lambda', 0.1),
                 random_state=42,
                 verbose=-1
             )
         else:
             self.magnitude_model = xgb.XGBRegressor(
-                n_estimators=500,
-                max_depth=8,
-                learning_rate=0.03,
-                min_child_weight=3,
-                subsample=0.85,
-                colsample_bytree=0.85,
-                gamma=0.1,
-                reg_alpha=0.1,
-                reg_lambda=0.1,
-                random_state=42
+                n_estimators=base_params.get('n_estimators', 200),
+                max_depth=base_params.get('max_depth', 5),
+                learning_rate=base_params.get('learning_rate', 0.05),
+                min_child_weight=base_params.get('min_child_weight', 5),
+                subsample=base_params.get('subsample', 0.8),
+                colsample_bytree=base_params.get('colsample_bytree', 0.8),
+                gamma=base_params.get('gamma', 0.1),
+                reg_alpha=base_params.get('reg_alpha', 0.1),
+                reg_lambda=base_params.get('reg_lambda', 0.1),
+                random_state=42,
+                early_stopping_rounds=30,
+                verbosity=0
             )
 
-        # Cross-validation scores
+        # Cross-validation with early stopping
         cv_direction_scores = []
         cv_magnitude_scores = []
 
-        for train_idx, val_idx in tscv.split(X_scaled):
-            X_train, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
+        for train_idx, val_idx in tscv.split(X_selected):
+            X_train, X_val = X_selected.iloc[train_idx], X_selected.iloc[val_idx]
             y_dir_train, y_dir_val = y_direction.iloc[train_idx], y_direction.iloc[val_idx]
             y_mag_train, y_mag_val = y_magnitude.iloc[train_idx], y_magnitude.iloc[val_idx]
 
-            # Train direction model
-            self.direction_model.fit(X_train, y_dir_train)
+            # Train direction model with early stopping
+            if self.use_lightgbm:
+                self.direction_model.fit(X_train, y_dir_train)
+            else:
+                self.direction_model.fit(
+                    X_train, y_dir_train,
+                    eval_set=[(X_val, y_dir_val)],
+                    verbose=False
+                )
             dir_pred = self.direction_model.predict(X_val)
             cv_direction_scores.append(accuracy_score(y_dir_val, dir_pred))
 
-            # Train magnitude model
-            self.magnitude_model.fit(X_train, y_mag_train)
+            # Train magnitude model with early stopping
+            if self.use_lightgbm:
+                self.magnitude_model.fit(X_train, y_mag_train)
+            else:
+                self.magnitude_model.fit(
+                    X_train, y_mag_train,
+                    eval_set=[(X_val, y_mag_val)],
+                    verbose=False
+                )
             mag_pred = self.magnitude_model.predict(X_val)
             cv_magnitude_scores.append(mean_absolute_error(y_mag_val, mag_pred))
 
-        # Final training on all data
-        self.direction_model.fit(X_scaled, y_direction)
-        self.magnitude_model.fit(X_scaled, y_magnitude)
+        # Final training on all data (with a holdout for early stopping)
+        split_idx = int(len(X_selected) * 0.9)
+        X_train_final = X_selected.iloc[:split_idx]
+        X_val_final = X_selected.iloc[split_idx:]
+        y_dir_train_final = y_direction.iloc[:split_idx]
+        y_dir_val_final = y_direction.iloc[split_idx:]
+        y_mag_train_final = y_magnitude.iloc[:split_idx]
+        y_mag_val_final = y_magnitude.iloc[split_idx:]
+
+        if self.use_lightgbm:
+            self.direction_model.fit(X_train_final, y_dir_train_final)
+            self.magnitude_model.fit(X_train_final, y_mag_train_final)
+        else:
+            self.direction_model.fit(
+                X_train_final, y_dir_train_final,
+                eval_set=[(X_val_final, y_dir_val_final)],
+                verbose=False
+            )
+            self.magnitude_model.fit(
+                X_train_final, y_mag_train_final,
+                eval_set=[(X_val_final, y_mag_val_final)],
+                verbose=False
+            )
+
+        # Calibrate confidence on holdout set (Platt scaling)
+        try:
+            from sklearn.calibration import CalibratedClassifierCV
+            val_probs = self.direction_model.predict_proba(X_val_final)
+            val_preds = self.direction_model.predict(X_val_final)
+            val_acc = accuracy_score(y_dir_val_final, val_preds)
+            logger.info(f'Holdout accuracy before calibration: {val_acc:.2%}')
+
+            # Wrap the trained model with isotonic calibration
+            self.calibrator = CalibratedClassifierCV(
+                self.direction_model, method='isotonic', cv='prefit'
+            )
+            self.calibrator.fit(X_val_final, y_dir_val_final)
+            logger.info(f'Confidence calibration fitted on {len(X_val_final)} samples')
+        except Exception as cal_err:
+            logger.warning(f'Calibration failed: {cal_err}, using raw probabilities')
+            self.calibrator = None
 
         metrics = {
             'symbol': symbol,
-            'samples': len(X),
-            'features': len(available_cols),
+            'samples': len(X_selected),
+            'samples_filtered': len(features) - len(X_selected),
+            'features_original': len(available_cols),
+            'features_selected': len(self.selected_feature_names),
+            'selected_features': self.selected_feature_names,
             'direction_accuracy': np.mean(cv_direction_scores),
             'direction_std': np.std(cv_direction_scores),
             'magnitude_mae': np.mean(cv_magnitude_scores),
             'magnitude_std': np.std(cv_magnitude_scores),
+            'hyperparameters': self.best_params or base_params,
+            'target_threshold': self.target_threshold,
+            'prediction_horizon_days': days,
             'trained_at': datetime.now().isoformat()
         }
 
-        logger.info(f'Training complete for {symbol}: Direction accuracy={metrics["direction_accuracy"]:.2%}, MAE={metrics["magnitude_mae"]:.2f}%')
+        logger.info(f'Training complete for {symbol}: Direction accuracy={metrics["direction_accuracy"]:.2%}, '
+                   f'MAE={metrics["magnitude_mae"]:.2f}%, Features={len(self.selected_feature_names)}')
 
         # Save models
         if save_model:
@@ -633,6 +844,7 @@ class StockMLModel:
     def predict(self, data, indicators, days=5):
         """
         Make prediction using trained ML models.
+        ENHANCED: Uses feature selection from training.
 
         Args:
             data: Recent OHLCV data (DataFrame)
@@ -663,14 +875,29 @@ class StockMLModel:
             index=X.index
         )
 
-        # Predict direction
-        direction_prob = self.direction_model.predict_proba(X_scaled)[0]
-        direction_pred = self.direction_model.predict(X_scaled)[0]
+        # Apply feature selection if available
+        if self.selected_feature_names is not None:
+            # Use selected feature names directly (works for both tree-based and SelectKBest)
+            available = [col for col in self.selected_feature_names if col in X_scaled.columns]
+            X_selected = X_scaled[available]
+        elif self.feature_selector is not None:
+            X_selected = self.feature_selector.transform(X_scaled)
+            X_selected = pd.DataFrame(X_selected, columns=self.selected_feature_names, index=X.index)
+        else:
+            X_selected = X_scaled
+
+        # Predict direction (use calibrated probabilities if available)
+        if hasattr(self, 'calibrator') and self.calibrator is not None:
+            direction_prob = self.calibrator.predict_proba(X_selected)[0]
+            direction_pred = self.calibrator.predict(X_selected)[0]
+        else:
+            direction_prob = self.direction_model.predict_proba(X_selected)[0]
+            direction_pred = self.direction_model.predict(X_selected)[0]
 
         # Predict magnitude
-        magnitude_pred = self.magnitude_model.predict(X_scaled)[0]
+        magnitude_pred = self.magnitude_model.predict(X_selected)[0]
 
-        # Calculate confidence from probability
+        # Calculate confidence from calibrated probability
         confidence = max(direction_prob) * 100
 
         # Determine direction
@@ -690,11 +917,12 @@ class StockMLModel:
                 'up': round(direction_prob[1] * 100, 1),
                 'down': round(direction_prob[0] * 100, 1)
             },
-            'model_type': 'lightgbm' if self.use_lightgbm else 'xgboost'
+            'model_type': 'lightgbm' if self.use_lightgbm else 'xgboost',
+            'features_used': len(self.selected_feature_names) if self.selected_feature_names else len(available_cols)
         }
 
     def save_model(self, symbol='generic'):
-        """Save trained models to disk."""
+        """Save trained models to disk including feature selector."""
         if self.direction_model is None:
             return
 
@@ -704,15 +932,23 @@ class StockMLModel:
             'scaler': self.scaler,
             'feature_columns': self.feature_columns,
             'use_lightgbm': self.use_lightgbm,
+            # Feature selection components
+            'feature_selector': self.feature_selector,
+            'selected_feature_names': self.selected_feature_names,
+            'n_features': self.n_features,
+            'target_threshold': self.target_threshold,
+            'best_params': self.best_params,
+            # Confidence calibration
+            'calibrator': getattr(self, 'calibrator', None),
             'saved_at': datetime.now().isoformat()
         }
 
         path = self._get_model_path(symbol, 'full')
         joblib.dump(model_data, path)
-        logger.info(f'Model saved to {path}')
+        logger.info(f'Model saved to {path} (features: {len(self.selected_feature_names) if self.selected_feature_names else "all"})')
 
     def load_model(self, symbol='generic'):
-        """Load trained models from disk."""
+        """Load trained models from disk including feature selector."""
         path = self._get_model_path(symbol, 'full')
 
         if not os.path.exists(path):
@@ -728,19 +964,35 @@ class StockMLModel:
             self.magnitude_model = model_data['magnitude_model']
             self.scaler = model_data['scaler']
             self.feature_columns = model_data.get('feature_columns', self.feature_columns)
-            logger.info(f'Model loaded from {path}')
+            # NEW: Load feature selection components
+            self.feature_selector = model_data.get('feature_selector', None)
+            self.selected_feature_names = model_data.get('selected_feature_names', None)
+            self.n_features = model_data.get('n_features', 25)
+            self.target_threshold = model_data.get('target_threshold', 1.0)
+            self.best_params = model_data.get('best_params', None)
+            self.calibrator = model_data.get('calibrator', None)
+
+            features_info = f", features: {len(self.selected_feature_names)}" if self.selected_feature_names else ""
+            logger.info(f'Model loaded from {path}{features_info}')
             return True
         except Exception as e:
             logger.error(f'Error loading model: {e}')
             return False
 
     def get_feature_importance(self):
-        """Get feature importance from trained models."""
+        """Get feature importance from trained models using selected features."""
         if self.direction_model is None:
             return None
 
+        # Use selected feature names if available
+        feature_names = self.selected_feature_names if self.selected_feature_names else self.feature_columns
+
+        # Ensure we have the right number of features
+        n_importances = len(self.direction_model.feature_importances_)
+        feature_names = feature_names[:n_importances]
+
         importance = pd.DataFrame({
-            'feature': self.feature_columns[:len(self.direction_model.feature_importances_)],
+            'feature': feature_names,
             'importance': self.direction_model.feature_importances_
         }).sort_values('importance', ascending=False)
 
@@ -750,21 +1002,35 @@ class StockMLModel:
 class EnsemblePredictor:
     """
     Ensemble model combining XGBoost and LightGBM predictions.
+    ENHANCED: Now uses feature selection and hyperparameter tuning.
     """
 
-    def __init__(self, model_dir='trained_models'):
-        self.xgb_model = StockMLModel(model_dir, use_lightgbm=False)
-        self.lgb_model = StockMLModel(model_dir, use_lightgbm=True)
+    def __init__(self, model_dir='trained_models', n_features=30, target_threshold=0.3, use_tuning=True):
+        self.xgb_model = StockMLModel(model_dir, use_lightgbm=False,
+                                       n_features=n_features, target_threshold=target_threshold,
+                                       use_tuning=use_tuning)
+        self.lgb_model = StockMLModel(model_dir, use_lightgbm=True,
+                                       n_features=n_features, target_threshold=target_threshold,
+                                       use_tuning=False)  # Only tune XGBoost to save time
         self.model_dir = model_dir
+        self.n_features = n_features
+        self.target_threshold = target_threshold
 
-    def train(self, symbol, data, indicators, days=5):
-        """Train both models."""
+    def train(self, symbol, data, indicators, days=7):
+        """Train both models with improved settings."""
         xgb_metrics = self.xgb_model.train(symbol, data, indicators, days)
         lgb_metrics = self.lgb_model.train(symbol, data, indicators, days)
 
+        # Calculate ensemble accuracy estimate
+        ensemble_accuracy = None
+        if xgb_metrics and lgb_metrics:
+            ensemble_accuracy = (xgb_metrics.get('direction_accuracy', 0) +
+                               lgb_metrics.get('direction_accuracy', 0)) / 2
+
         return {
             'xgboost': xgb_metrics,
-            'lightgbm': lgb_metrics
+            'lightgbm': lgb_metrics,
+            'ensemble_accuracy_estimate': ensemble_accuracy
         }
 
     def predict(self, data, indicators, days=5):
@@ -782,6 +1048,9 @@ class EnsemblePredictor:
         if lgb_pred is None:
             return xgb_pred
 
+        # Disagreement detection: if models disagree on direction, slash confidence
+        models_agree = xgb_pred['direction'] == lgb_pred['direction']
+
         # Average probabilities
         avg_up = (xgb_pred['probabilities']['up'] + lgb_pred['probabilities']['up']) / 2
         avg_down = (xgb_pred['probabilities']['down'] + lgb_pred['probabilities']['down']) / 2
@@ -793,6 +1062,11 @@ class EnsemblePredictor:
         direction = 'UP' if avg_up > avg_down else 'DOWN'
         confidence = max(avg_up, avg_down)
 
+        # Penalize confidence when models disagree (this is a weak signal)
+        if not models_agree:
+            confidence = min(confidence, 52.0)  # Cap at barely above random
+            logger.info(f'Ensemble disagreement: XGB={xgb_pred["direction"]}, LGB={lgb_pred["direction"]} → confidence capped at {confidence}%')
+
         return {
             'direction': direction,
             'confidence': round(confidence, 1),
@@ -802,6 +1076,7 @@ class EnsemblePredictor:
                 'down': round(avg_down, 1)
             },
             'model_type': 'ensemble',
+            'models_agree': models_agree,
             'components': {
                 'xgboost': xgb_pred,
                 'lightgbm': lgb_pred

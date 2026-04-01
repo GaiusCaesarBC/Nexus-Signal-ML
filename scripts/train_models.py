@@ -69,26 +69,34 @@ DEFAULT_CRYPTO = [
 DEFAULT_SYMBOLS = DEFAULT_STOCKS + DEFAULT_CRYPTO
 
 
-def train_models(symbols, days=7, use_ensemble=True):
+def train_models(symbols, days=7, use_ensemble=True, n_features=25, target_threshold=1.0, use_tuning=True):
     """
     Train ML models for the given symbols.
+    ENHANCED: Now uses feature selection and hyperparameter tuning.
 
     Args:
         symbols: List of stock symbols
         days: Prediction horizon in days
         use_ensemble: Whether to use ensemble (XGBoost + LightGBM)
+        n_features: Number of top features to select (default 25)
+        target_threshold: Minimum % change to classify as UP/DOWN (default 1.0%)
+        use_tuning: Whether to use Optuna hyperparameter tuning
 
     Returns:
         Dict with training results
     """
     logger.info(f'Starting training for {len(symbols)} symbols')
     logger.info(f'Prediction horizon: {days} days, Ensemble: {use_ensemble}')
+    logger.info(f'Features: {n_features}, Target threshold: {target_threshold}%, Tuning: {use_tuning}')
 
-    # Initialize predictor
+    # Initialize predictor with improved settings
     predictor = StockPredictor(
         model_dir='trained_models',
         use_ml=True,
-        use_ensemble=use_ensemble
+        use_ensemble=use_ensemble,
+        n_features=n_features,
+        target_threshold=target_threshold,
+        use_tuning=use_tuning
     )
 
     tech_indicators = TechnicalIndicators()
@@ -186,6 +194,23 @@ def main():
         action='store_true',
         help='Use single XGBoost model instead of ensemble'
     )
+    parser.add_argument(
+        '--features', '-f',
+        type=int,
+        default=30,
+        help='Number of top features to select (default: 30)'
+    )
+    parser.add_argument(
+        '--threshold', '-t',
+        type=float,
+        default=0.3,
+        help='Minimum %% change to classify as UP/DOWN (default: 0.3%%)'
+    )
+    parser.add_argument(
+        '--no-tuning',
+        action='store_true',
+        help='Disable Optuna hyperparameter tuning'
+    )
 
     args = parser.parse_args()
 
@@ -212,11 +237,14 @@ def main():
     # Create trained_models directory
     os.makedirs('trained_models', exist_ok=True)
 
-    # Run training
+    # Run training with improved settings
     results = train_models(
         symbols=symbols,
         days=args.days,
-        use_ensemble=not args.no_ensemble
+        use_ensemble=not args.no_ensemble,
+        n_features=args.features,
+        target_threshold=args.threshold,
+        use_tuning=not args.no_tuning
     )
 
     # Print summary

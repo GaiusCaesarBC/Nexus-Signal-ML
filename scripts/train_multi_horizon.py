@@ -81,14 +81,18 @@ HORIZON_DESCRIPTIONS = {
 }
 
 
-def train_horizon(symbols, days, model_dir):
+def train_horizon(symbols, days, model_dir, n_features=30, target_threshold=0.3, use_tuning=True):
     """
     Train ML models for a specific prediction horizon.
+    ENHANCED: Now uses feature selection and hyperparameter tuning.
 
     Args:
         symbols: List of stock symbols
         days: Prediction horizon in days
         model_dir: Directory to save models
+        n_features: Number of top features to select
+        target_threshold: Minimum % change to classify as UP/DOWN
+        use_tuning: Whether to use Optuna hyperparameter tuning
 
     Returns:
         Dict with training results
@@ -96,16 +100,20 @@ def train_horizon(symbols, days, model_dir):
     logger.info(f'\n{"="*60}')
     logger.info(f'Training {days}-day prediction models')
     logger.info(f'Model directory: {model_dir}')
+    logger.info(f'Features: {n_features}, Threshold: {target_threshold}%, Tuning: {use_tuning}')
     logger.info(f'{"="*60}')
 
     # Create model directory for this horizon
     os.makedirs(model_dir, exist_ok=True)
 
-    # Initialize predictor with horizon-specific directory
+    # Initialize predictor with improved settings
     predictor = StockPredictor(
         model_dir=model_dir,
         use_ml=True,
-        use_ensemble=True
+        use_ensemble=True,
+        n_features=n_features,
+        target_threshold=target_threshold,
+        use_tuning=use_tuning
     )
 
     tech_indicators = TechnicalIndicators()
@@ -220,6 +228,23 @@ def main():
         action='store_true',
         help='Use single XGBoost model instead of ensemble'
     )
+    parser.add_argument(
+        '--features', '-f',
+        type=int,
+        default=30,
+        help='Number of top features to select (default: 30)'
+    )
+    parser.add_argument(
+        '--threshold', '-t',
+        type=float,
+        default=0.3,
+        help='Minimum %% change to classify as UP/DOWN (default: 0.3%%)'
+    )
+    parser.add_argument(
+        '--no-tuning',
+        action='store_true',
+        help='Disable Optuna hyperparameter tuning'
+    )
 
     args = parser.parse_args()
 
@@ -243,11 +268,16 @@ def main():
     logger.info(f'Symbols: {len(symbols)} ({stock_count} stocks, {crypto_count} crypto)')
     logger.info(f'Horizons: {args.horizons} days')
 
-    # Train each horizon
+    # Train each horizon with improved settings
     all_results = {}
     for horizon in args.horizons:
         model_dir = f'trained_models/{horizon}d'
-        results = train_horizon(symbols, horizon, model_dir)
+        results = train_horizon(
+            symbols, horizon, model_dir,
+            n_features=args.features,
+            target_threshold=args.threshold,
+            use_tuning=not args.no_tuning
+        )
         all_results[horizon] = results
 
     # Print summary
