@@ -470,6 +470,28 @@ class StockMLModel:
         features['mean_reversion_20d'] = (df['Close'] - sma_20_mr) / sma_20_mr * 100
         features['mean_reversion_50d'] = (df['Close'] - sma_50_mr) / sma_50_mr * 100
 
+        # SENTIMENT: Market sentiment features (Fear & Greed, news)
+        try:
+            from utils.sentiment_data import build_sentiment_features
+            sentiment = build_sentiment_features(
+                indicators.get('_symbol', ''),
+                data_length=len(df)
+            )
+            for key, value in sentiment.items():
+                features[key] = value
+        except Exception as e:
+            # Sentiment data is optional — don't fail training if unavailable
+            logger.debug(f'Sentiment features unavailable: {e}')
+            features['fear_greed'] = 50
+            features['fear_greed_avg_7d'] = 50
+            features['fear_greed_avg_30d'] = 50
+            features['fear_greed_change'] = 0
+            features['extreme_fear'] = 0
+            features['extreme_greed'] = 0
+            features['news_sentiment'] = 0
+            features['news_buzz'] = 0
+            features['news_volume'] = 0
+
         # Fill NaN values — ffill only (bfill leaks future data into past rows)
         features = features.ffill()
         features = features.replace([np.inf, -np.inf], 0)
@@ -592,6 +614,9 @@ class StockMLModel:
             return None
 
         logger.info(f'Training ML model for {symbol} with {len(data)} samples, {days}-day horizon')
+
+        # Pass symbol to feature engineering for sentiment lookup
+        indicators['_symbol'] = symbol
 
         # Engineer features
         features = self.engineer_features(data, indicators)
@@ -857,6 +882,10 @@ class StockMLModel:
         if self.direction_model is None or self.magnitude_model is None:
             logger.warning('Models not trained, falling back to rule-based')
             return None
+
+        # Pass symbol for sentiment lookup if available
+        if '_symbol' not in indicators:
+            indicators['_symbol'] = ''
 
         # Engineer features
         features = self.engineer_features(data, indicators)

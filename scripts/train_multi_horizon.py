@@ -129,8 +129,8 @@ def train_horizon(symbols, days, model_dir, n_features=30, target_threshold=0.3,
         logger.info(f'[{i+1}/{len(symbols)}] Training {symbol} ({days}d)...')
 
         try:
-            # Fetch historical data (2 years for better training)
-            stock_data = fetch_stock_data(symbol, period='2y')
+            # Fetch maximum historical data (5 years for better training)
+            stock_data = fetch_stock_data(symbol, period='5y')
 
             # Rate limiting
             if is_crypto(symbol):
