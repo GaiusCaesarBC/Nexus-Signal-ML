@@ -33,41 +33,50 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Top 50 stocks by market cap and trading volume
+# Top 100 stocks by market cap and trading volume
 DEFAULT_STOCKS = [
-    # Tech Giants (15)
+    # Tech Giants (30)
     'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'TSLA', 'AVGO', 'ORCL', 'CRM',
     'AMD', 'ADBE', 'INTC', 'CSCO', 'NFLX',
-    # Finance (10)
+    'QCOM', 'TXN', 'IBM', 'AMAT', 'LRCX', 'MU', 'KLAC', 'SNPS', 'CDNS', 'NOW',
+    'PANW', 'PLTR', 'UBER', 'ABNB', 'SHOP',
+    # Finance (20)
     'JPM', 'BAC', 'GS', 'V', 'MA', 'WFC', 'C', 'BLK', 'AXP', 'MS',
-    # Healthcare (8)
+    'SCHW', 'SPGI', 'PGR', 'MMC', 'CB', 'ICE', 'CME', 'PNC', 'USB', 'COF',
+    # Healthcare (16)
     'JNJ', 'UNH', 'PFE', 'LLY', 'ABBV', 'MRK', 'TMO', 'ABT',
-    # Consumer (7)
+    'DHR', 'BMY', 'AMGN', 'GILD', 'CVS', 'ELV', 'VRTX', 'ISRG',
+    # Consumer (14)
     'WMT', 'KO', 'PEP', 'MCD', 'COST', 'HD', 'NKE',
-    # Energy (4)
-    'XOM', 'CVX', 'COP', 'SLB',
-    # Industrial (3)
-    'BA', 'CAT', 'GE',
-    # ETFs (3)
-    'SPY', 'QQQ', 'IWM'
+    'SBUX', 'TGT', 'LOW', 'BKNG', 'DIS', 'PG', 'MDLZ',
+    # Energy (8)
+    'XOM', 'CVX', 'COP', 'SLB', 'PSX', 'EOG', 'MPC', 'VLO',
+    # Industrial (6)
+    'BA', 'CAT', 'GE', 'HON', 'UPS', 'LMT',
+    # ETFs (6)
+    'SPY', 'QQQ', 'IWM', 'DIA', 'VTI', 'XLF'
 ]
 
-# Top 50 cryptocurrencies by market cap
+# Top 100 cryptocurrencies by market cap
 DEFAULT_CRYPTO = [
-    # Top tier (10)
+    # Top tier (20)
     'BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'ADA', 'DOGE', 'TRX', 'AVAX', 'DOT',
-    # High cap altcoins (15)
-    'LINK', 'MATIC', 'SHIB', 'LTC', 'BCH', 'UNI', 'ATOM', 'XLM', 'ETC', 'NEAR',
-    'HBAR', 'FIL', 'VET', 'ALGO', 'ICP',
-    # DeFi & Layer 2 (10)
-    'AAVE', 'MKR', 'GRT', 'CRV', 'COMP', 'ARB', 'OP', 'INJ', 'SUI', 'APT',
-    # Mid cap with volume (10)
-    'SAND', 'MANA', 'AXS', 'ENJ', 'BAT', 'ZRX', 'SUSHI', '1INCH', 'YFI', 'SNX',
-    # Meme coins with liquidity (5)
-    'PEPE', 'WIF', 'BONK', 'FLOKI', 'TRUMP'
+    'TON', 'BCH', 'LINK', 'LTC', 'MATIC', 'SHIB', 'UNI', 'ATOM', 'NEAR', 'XLM',
+    # High cap altcoins (30)
+    'ETC', 'HBAR', 'FIL', 'VET', 'ALGO', 'ICP', 'XMR', 'APT', 'ARB', 'OP',
+    'SUI', 'INJ', 'STX', 'KAS', 'TIA', 'SEI', 'RUNE', 'THETA', 'FTM', 'EGLD',
+    'FLOW', 'IMX', 'GALA', 'CHZ', 'CRO', 'LDO', 'JUP', 'PYTH', 'SAND', 'MANA',
+    # DeFi & Layer 2 (20)
+    'AAVE', 'MKR', 'GRT', 'CRV', 'COMP', 'SNX', 'SUSHI', '1INCH', 'YFI', 'PENDLE',
+    'ENS', 'ENA', 'ETHFI', 'LRC', 'DYDX', 'GMX', 'JTO', 'RAY', 'CAKE', 'QNT',
+    # Mid cap with volume (20)
+    'AXS', 'ENJ', 'BAT', 'ZRX', 'FET', 'RNDR', 'WLD', 'ONDO', 'JASMY', 'BLUR',
+    'CELO', 'DASH', 'ZEC', 'KAVA', 'ONE', 'ZIL', 'MINA', 'TAO', 'ORDI', 'ROSE',
+    # Meme coins with liquidity (10)
+    'PEPE', 'WIF', 'BONK', 'FLOKI', 'TRUMP', 'MEW', 'BRETT', 'PNUT', 'POPCAT', 'MOODENG'
 ]
 
-# Combined default (all 100)
+# Combined default (all 200)
 DEFAULT_SYMBOLS = DEFAULT_STOCKS + DEFAULT_CRYPTO
 
 # Default prediction horizons
